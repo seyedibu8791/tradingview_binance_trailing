@@ -314,7 +314,7 @@ def ping():
 def self_ping():
     while True:
         try:
-            requests.get(f"https://tradingview-binance-2o1v.onrender.com/ping")
+            requests.get(f"https://tradingview-binance-trailing.onrender.com/ping")
         except:
             pass
         time.sleep(5 * 60)
