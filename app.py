@@ -1,4 +1,4 @@
-# app.py (updated: trailing monitor -> market exit only, configs moved to config.py)
+# app.py (Final - trailing monitor active for all exits, market exit only)
 from flask import Flask, request, jsonify
 import requests, hmac, hashlib, time, threading, os
 from config import (
@@ -11,7 +11,6 @@ from trade_notifier import log_trade_entry, log_trade_exit, trades  # ✅ includ
 
 app = Flask(__name__)
 
-# Keep a small lock for trades dict writes when needed
 from threading import Lock
 trades_lock = Lock()
 
@@ -142,6 +141,7 @@ def wait_and_notify_filled_entry(symbol, side, order_id):
                     "trailing_monitor_started": False
                 }
             log_trade_entry(symbol, side, order_id, avg_price)
+            threading.Thread(target=monitor_trailing_and_exit, args=(symbol, side), daemon=True).start()
             notified = True
 
         if status in ("FILLED", "CANCELED", "REJECTED", "EXPIRED"):
@@ -282,28 +282,29 @@ def webhook():
             ticker, comment, close_price, bar_high, bar_low, interval = parts[:6]
         else:
             ticker, comment, close_price, interval = parts[0], parts[1], parts[2], parts[-1]
+
         symbol = ticker.replace("USDT", "") + "USDT"
         close_price = float(close_price)
+        comment = comment.upper().strip()
+
+        print(f"📩 Alert: {symbol} | {comment} | {close_price}")
 
         if comment == "BUY_ENTRY":
-            async_exit_and_open(symbol, "BUY", close_price)
+            open_position(symbol, "BUY", close_price)
         elif comment == "SELL_ENTRY":
-            async_exit_and_open(symbol, "SELL", close_price)
-        elif comment == "CROSS_EXIT_SHORT":
-            execute_market_exit(symbol, "BUY")
-        elif comment == "CROSS_EXIT_LONG":
-            execute_market_exit(symbol, "SELL")
-        elif comment == "EXIT_LONG":
-            start_trailing_then_exit(symbol, comment)
-        elif comment == "EXIT_SHORT":
-            start_trailing_then_exit(symbol, comment)
+            open_position(symbol, "SELL", close_price)
+        elif comment in ("EXIT_LONG", "CROSS_EXIT_LONG"):
+            threading.Thread(target=monitor_trailing_and_exit, args=(symbol, "BUY"), daemon=True).start()
+        elif comment in ("EXIT_SHORT", "CROSS_EXIT_SHORT"):
+            threading.Thread(target=monitor_trailing_and_exit, args=(symbol, "SELL"), daemon=True).start()
         else:
-            return jsonify({"error": f"Unknown comment: {comment}"})
+            print(f"⚠️ Unknown comment: {comment}")
+            return jsonify({"error": f"Unknown comment: {comment}"}), 400
 
         return jsonify({"status": "ok"})
     except Exception as e:
         print("❌ Webhook Error:", e)
-        return jsonify({"error": str(e)})
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/ping", methods=["GET"])
