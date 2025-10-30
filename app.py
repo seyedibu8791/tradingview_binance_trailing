@@ -1,4 +1,4 @@
-# app.py (Final - trailing monitor active for all exits, market exit only)
+# app.py (Final - with trailing monitor active for all exits, market exit only)
 from flask import Flask, request, jsonify
 import requests, hmac, hashlib, time, threading, os
 from config import (
@@ -272,6 +272,21 @@ def monitor_trailing_and_exit(symbol, side):
         time.sleep(1)
 
 
+# ===== Async Exit + Re-entry =====
+def async_exit_and_open(symbol, side, entry_price):
+    """Exit opposite position and open new one asynchronously"""
+    def worker():
+        try:
+            print(f"🔄 Exiting opposite & opening new {side} for {symbol}")
+            execute_market_exit(symbol, "SELL" if side == "BUY" else "BUY")
+            time.sleep(OPPOSITE_CLOSE_DELAY)
+            open_position(symbol, side, entry_price)
+            print(f"✅ Opposite closed, new {side} trade opened for {symbol}")
+        except Exception as e:
+            print("❌ async_exit_and_open error:", e)
+    threading.Thread(target=worker, daemon=True).start()
+
+
 # ===== Webhook =====
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -315,7 +330,7 @@ def ping():
 def self_ping():
     while True:
         try:
-            requests.get(f"https://tradingview-binance-trailing.onrender.com/ping")
+            requests.get("https://tradingview-binance-trailing.onrender.com/ping")
         except:
             pass
         time.sleep(5 * 60)
