@@ -1,34 +1,42 @@
 import os
-import time
-import hmac
-import hashlib
-import requests
 
 # =============================
-#  ENVIRONMENT CONFIGURATION
+#  BINANCE API CONFIG
 # =============================
-
-# --- Binance API Configuration ---
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
-
-# --- Mode (TESTNET or MAINNET) ---
-ENVIRONMENT = os.getenv("ENVIRONMENT", "TESTNET").upper()
-BASE_URL = (
-    "https://testnet.binancefuture.com"
-    if ENVIRONMENT == "TESTNET"
-    else "https://fapi.binance.com"
-)
+BASE_URL = "https://fapi.binance.com" if os.getenv("USE_TESTNET", "False").lower() != "true" else "https://testnet.binancefuture.com"
 
 # =============================
-#  TRADING PARAMETERS
+#  TRADE SETTINGS
 # =============================
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 50))       # USD value per trade
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 50))
 LEVERAGE = int(os.getenv("LEVERAGE", 20))
-MARGIN_TYPE = os.getenv("MARGIN_TYPE", "ISOLATED").upper()  # CROSS or ISOLATED
-MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", 5))
+MARGIN_TYPE = os.getenv("MARGIN_TYPE", "ISOLATED")
+MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", 3))
+MAX_ACTIVE_THREADS = int(os.getenv("MAX_ACTIVE_THREADS", 5))
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 12))
+LOSS_BARS_LIMIT = int(os.getenv("LOSS_BARS_LIMIT", 3))
 EXIT_MARKET_DELAY = int(os.getenv("EXIT_MARKET_DELAY", 10))
-OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", 3))
+OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", 5))
+
+# =============================
+#  TELEGRAM CONFIG
+# =============================
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# =============================
+#  LOGGING CONFIG
+# =============================
+LOG_FILE = os.getenv("LOG_FILE", "trade_log.txt")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+ENVIRONMENT = os.getenv("ENVIRONMENT", "live")
+
+# =============================
+#  DAILY SUMMARY TIME
+# =============================
+DAILY_SUMMARY_TIME_IST = os.getenv("DAILY_SUMMARY_TIME_IST", "22:00")
 
 # =============================
 #  TRAILING STOP PARAMETERS
@@ -41,81 +49,22 @@ DUAL_TRAILING_ENABLED = os.getenv("DUAL_TRAILING_ENABLED", "True").lower() == "t
 TRAILING_DISTANCE_PCT = float(os.getenv("TRAILING_DISTANCE_PCT", 0.3))
 TRAILING_COMPARE_PNL = os.getenv("TRAILING_COMPARE_PNL", "True").lower() == "true"
 
-# =============================
-#  LOSS CONTROL PARAMETERS
-# =============================
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 3.0))      # percent configured by user
-LOSS_BARS_LIMIT = int(os.getenv("LOSS_BARS_LIMIT", 2))       # consecutive bars negative to force exit
+# ============================================
+#  ADVANCED TRAILING STOP LOGIC (UNIFIED + AUTO TIGHTEN)
+# ============================================
+BEST_STOP_TRACKER = os.getenv("BEST_STOP_TRACKER", "True").lower() == "true"
+SECOND_TRAILING_TIGHTEN_PCT = float(os.getenv("SECOND_TRAILING_TIGHTEN_PCT", 0.5))
+SECOND_TRAILING_MIN_PNL_DIFF = float(os.getenv("SECOND_TRAILING_MIN_PNL_DIFF", 0.2))
 
 # =============================
-#  TELEGRAM CONFIGURATION
+#  FLASK SETTINGS
 # =============================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
+FLASK_PORT = int(os.getenv("FLASK_PORT", 5000))
 
 # =============================
-#  MISC / APP CONFIGURATION
+#  TESTNET / LIVE KEYS
 # =============================
-DEBUG = os.getenv("DEBUG", "False").lower() == "true"
-
-# =============================
-#  LOG CONFIGURATION DETAILS
-# =============================
-print("📘 CONFIGURATION LOADED")
-print("------------------------------")
-print(f"Environment:           {ENVIRONMENT}")
-print(f"Leverage:              {LEVERAGE}x ({MARGIN_TYPE})")
-print(f"Trade Amount:          ${TRADE_AMOUNT}")
-print(f"Exit Market Delay:     {EXIT_MARKET_DELAY}s")
-print(f"Trailing Activation:   {TRAILING_ACTIVATION_PCT}%")
-print(f"Trailing Low Offset:   {TS_LOW_OFFSET_PCT}%")
-print(f"Trailing High Offset:  {TS_HIGH_OFFSET_PCT}%")
-print(f"Trailing Distance:     {TRAILING_DISTANCE_PCT}%")
-print(f"Dual Trailing:         {DUAL_TRAILING_ENABLED}")
-print(f"Compare PnL Trail:     {TRAILING_COMPARE_PNL}")
-print(f"Opposite Close Delay:  {OPPOSITE_CLOSE_DELAY}s")
-print(f"Max Active Trades:     {MAX_ACTIVE_TRADES}")
-print(f"Stop Loss %:           {STOP_LOSS_PCT}% (multiplied by leverage for threshold)")
-print(f"Loss Bars Limit:       {LOSS_BARS_LIMIT}")
-print("------------------------------")
-
-# =============================
-#  FUNCTION: GET UNREALIZED PNL (signed request)
-# =============================
-def _signed_get(path: str, params: dict = None, timeout: int = 10):
-    """Helper: signed GET to Binance Futures"""
-    if params is None:
-        params = {}
-    params["timestamp"] = int(time.time() * 1000)
-    query = "&".join([f"{k}={v}" for k, v in params.items()])
-    signature = hmac.new(BINANCE_SECRET_KEY.encode(), query.encode(), hashlib.sha256).hexdigest()
-    url = f"{BASE_URL}{path}?{query}&signature={signature}"
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-    r = requests.get(url, headers=headers, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
-
-def get_unrealized_pnl_pct(symbol: str):
-    """
-    Returns unrealized PnL percent (scaled by leverage) for the given symbol.
-    If no position or error, returns None.
-    """
-    try:
-        data = _signed_get("/fapi/v2/positionRisk")
-        for pos in data:
-            if pos["symbol"].upper() == symbol.upper() and abs(float(pos.get("positionAmt", 0))) > 0:
-                # unRealizedProfit is USD (positive/negative)
-                unpnl = float(pos.get("unRealizedProfit", 0.0))
-                entry_price = float(pos.get("entryPrice", 0.0))
-                position_amt = abs(float(pos.get("positionAmt", 0.0)))
-                if entry_price <= 0 or position_amt <= 0:
-                    return None
-                notional = entry_price * position_amt
-                # pnl% relative to notional, scaled by leverage to match your logic
-                pnl_pct = (unpnl / notional) * 100 * LEVERAGE
-                return pnl_pct
-        return None
-    except Exception as e:
-        if DEBUG:
-            print("⚠️ get_unrealized_pnl_pct error:", e)
-        return None
+USE_TESTNET = os.getenv("USE_TESTNET", "False").lower() == "true"
+LIVE_API_KEY = os.getenv("LIVE_API_KEY", "")
+LIVE_SECRET_KEY = os.getenv("LIVE_SECRET_KEY", "")
