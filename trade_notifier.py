@@ -9,7 +9,7 @@ from typing import Optional
 
 from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-    TRADE_AMOUNT, LEVERAGE, STOP_LOSS_PCT, LOSS_BARS_LIMIT,
+    TRADE_AMOUNT, LEVERAGE, STOP_LOSS_PCT,
     BASE_URL, BINANCE_API_KEY, BINANCE_SECRET_KEY, DEBUG,
     TRAILING_COMPARE_PNL, TS_LOW_OFFSET_PCT, TS_HIGH_OFFSET_PCT
 )
@@ -17,7 +17,7 @@ from config import (
 # =======================
 # 📦 STORAGE
 # =======================
-trades = {}              # { symbol: {side, entry_price, order_id, closed, exit_price, pnl, pnl_percent, loss_bars, forced_exit, recovered} }
+trades = {}              # { symbol: {side, entry_price, entry_time, interval, closed, exit_price, pnl, pnl_percent, forced_exit, recovered} }
 notified_orders = set()  # prevent duplicate entry notifications
 
 
@@ -25,7 +25,6 @@ notified_orders = set()  # prevent duplicate entry notifications
 # 📢 TELEGRAM HELPER
 # =======================
 def send_telegram_message(message: str):
-    """Send formatted HTML message to configured Telegram chat."""
     try:
         if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
             if DEBUG:
@@ -70,7 +69,6 @@ def _signed_post(path: str, params: dict):
 # 🔎 Position helpers
 # =======================
 def get_position_info(symbol: str) -> Optional[dict]:
-    """Return position dict for symbol from /fapi/v2/positionRisk or None."""
     try:
         data = _signed_get("/fapi/v2/positionRisk")
         for p in data:
@@ -84,12 +82,6 @@ def get_position_info(symbol: str) -> Optional[dict]:
 
 
 def get_unrealized_pnl_pct(symbol: str) -> Optional[float]:
-    """
-    Compute unrealized PnL% *including leverage* for the open position on symbol.
-    Formula:
-      - For LONG: ((markPrice - entryPrice) / entryPrice) * 100 * LEVERAGE
-      - For SHORT: ((entryPrice - markPrice) / entryPrice) * 100 * LEVERAGE
-    """
     try:
         p = get_position_info(symbol)
         if not p:
@@ -114,7 +106,6 @@ def get_unrealized_pnl_pct(symbol: str) -> Optional[float]:
 # 🔒 Close on Binance
 # =======================
 def close_trade_on_binance(symbol: str, side: str):
-    """Force market close of the open position for symbol."""
     try:
         pos = get_position_info(symbol)
         if not pos:
@@ -136,9 +127,7 @@ def close_trade_on_binance(symbol: str, side: str):
 # =======================
 # 🟩 TRADE ENTRY
 # =======================
-def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
-    """Record entry and send Telegram notification. Prevent duplicate messages by order_id."""
-    # --- cleanup for same-direction re-entry ---
+def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, interval: str):
     if symbol in trades and trades[symbol].get("closed"):
         trades.pop(symbol, None)
 
@@ -154,9 +143,10 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
         "exit_price": None,
         "pnl": 0.0,
         "pnl_percent": 0.0,
-        "loss_bars": 0,
         "forced_exit": False,
-        "recovered": False
+        "recovered": False,
+        "entry_time": time.time(),
+        "interval": interval.lower()
     }
 
     direction_emoji = "🟩⬆️" if side.upper() == "BUY" else "🟥⬇️"
@@ -164,6 +154,7 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
         f"{direction_emoji} <b>{side.upper()} ENTRY</b>\n"
         f"┇#{symbol}\n"
         f"┇Entry: {filled_price}\n"
+        f"┇Interval: {interval}\n"
         f"┇Leverage: {LEVERAGE}x | Amount: ${TRADE_AMOUNT}\n"
         f"┇<i>Trailing & Risk Monitor Initiated</i>"
     )
@@ -174,7 +165,6 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
 # 🟥 TRADE EXIT
 # =======================
 def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
-    """Send close notification and update trade record (with accurate live PnL fetch)."""
     t = trades.get(symbol)
     if not t or t.get("closed"):
         return
@@ -182,7 +172,6 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
     t["closed"] = True
     t["exit_price"] = filled_price
 
-    # --- Fetch live PnL percent from Binance ---
     live_pct = get_unrealized_pnl_pct(symbol)
     pnl_percent = live_pct if live_pct is not None else t.get("pnl_percent", 0.0)
     pnl_value = (pnl_percent / 100.0) * TRADE_AMOUNT
@@ -190,7 +179,6 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
     t["pnl"] = round(pnl_value, 2)
     t["pnl_percent"] = round(pnl_percent or 0.0, 2)
 
-    # --- Emoji mapping based on PnL ---
     if t["pnl_percent"] > 0:
         emoji = "💰✅"
     elif t["pnl_percent"] < 0:
@@ -198,17 +186,15 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
     else:
         emoji = "⚪️"
 
-    # --- Reason text mapping ---
     reason_text = {
         "STOP_LOSS": "🚨 Stoploss Triggered",
-        "FORCE_CLOSE": "⚠️ 2-Bar Forced Exit",
+        "FORCE_CLOSE": "⚠️ 2-Bar Loss Exit",
         "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
         "MARKET_CLOSE": "✅ Market Close",
         "SAME_DIRECTION_REENTRY": "🔁 Same-Direction Re-entry Close",
         "NORMAL": "✅ Normal Close"
     }.get(reason, reason)
 
-    # --- Telegram message ---
     msg = (
         f"{emoji} <b>{reason_text}</b>\n"
         f"┇#{symbol}\n"
@@ -217,7 +203,6 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
         f"┇Reason: <i>{reason}</i>"
     )
 
-    # --- Highlight Forced Exit PnL ---
     if reason in ["FORCE_CLOSE", "STOP_LOSS"]:
         msg += f"\n┇<b>Force PnL</b>: {t['pnl_percent']}% ({t['pnl']}$)"
 
@@ -228,44 +213,43 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
 # 📉 LOSS MONITOR
 # =======================
 def check_loss_conditions(symbol: str, current_price: float = None):
-    """Evaluate ongoing trades for stoploss, 2-bar forced close, or recovery."""
     if symbol not in trades or trades[symbol].get("closed"):
         return
 
     t = trades[symbol]
     pnl_percent = get_unrealized_pnl_pct(symbol)
     if pnl_percent is None:
-        if current_price is None:
-            if DEBUG:
-                print(f"⚠️ No live PnL for {symbol} and no price provided.")
-            return
-        entry = t["entry_price"]
-        if t["side"] == "BUY":
-            pnl_percent = ((current_price - entry) / entry) * 100 * LEVERAGE
-        else:
-            pnl_percent = ((entry - current_price) / entry) * 100 * LEVERAGE
+        return
 
+    # bar durations
+    bar_durations = {
+        "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+        "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600,
+        "12h": 43200, "1d": 86400
+    }
+    bar_duration = bar_durations.get(t["interval"], 3600)
+    elapsed = time.time() - t["entry_time"]
+
+    # 3rd bar check (2 completed bars)
+    if elapsed >= 2 * bar_duration and pnl_percent < 0 and not t.get("forced_exit"):
+        t["forced_exit"] = True
+        send_telegram_message(
+            f"⚠️ <b>{symbol}</b> PnL negative after 2 bars → Force Close triggered at 3rd bar"
+        )
+        close_trade_on_binance(symbol, t["side"])
+        log_trade_exit(symbol, current_price or t["entry_price"], reason="FORCE_CLOSE")
+        return "FORCE_CLOSE"
+
+    # Immediate Stop Loss condition
     immediate_threshold = -(STOP_LOSS_PCT * LEVERAGE)
     if pnl_percent <= immediate_threshold and not t.get("forced_exit"):
         t["forced_exit"] = True
-        send_telegram_message(f"🚨 <b>{symbol}</b> PnL {round(pnl_percent,2)}% ≤ −{STOP_LOSS_PCT}×{LEVERAGE} → Immediate Exit")
+        send_telegram_message(
+            f"🚨 <b>{symbol}</b> PnL {pnl_percent}% ≤ −{STOP_LOSS_PCT}×{LEVERAGE} → Immediate Exit"
+        )
         close_trade_on_binance(symbol, t["side"])
-        log_trade_exit(symbol, current_price or 0, reason="STOP_LOSS")
+        log_trade_exit(symbol, current_price or t["entry_price"], reason="STOP_LOSS")
         return "STOP_LOSS"
-
-    if pnl_percent < 0:
-        t["loss_bars"] = t.get("loss_bars", 0) + 1
-        if t["loss_bars"] >= LOSS_BARS_LIMIT and not t.get("forced_exit"):
-            t["forced_exit"] = True
-            send_telegram_message(f"⚠️ <b>{symbol}</b> remained negative for {t['loss_bars']} bars → Forced Exit")
-            close_trade_on_binance(symbol, t["side"])
-            log_trade_exit(symbol, current_price or 0, reason="FORCE_CLOSE")
-            return "FORCE_CLOSE"
-    else:
-        if t.get("loss_bars", 0) > 0:
-            t["recovered"] = True
-            send_telegram_message(f"💪 <b>{symbol}</b> recovered — Trailing Resumed")
-        t["loss_bars"] = 0
 
     return None
 
@@ -295,7 +279,6 @@ def notify_trail_comparison(symbol: str, primary_pct: float, secondary_pct: Opti
 # 📊 DAILY SUMMARY THREAD
 # =======================
 def send_daily_summary():
-    """Runs background thread to send EOD summary (IST midnight)."""
     while True:
         now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5.5)))
         next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
@@ -324,7 +307,6 @@ def send_daily_summary():
         )
         send_telegram_message(msg)
 
-        # cleanup closed trades
         for s in list(trades.keys()):
             if trades[s].get("closed"):
                 trades.pop(s, None)
