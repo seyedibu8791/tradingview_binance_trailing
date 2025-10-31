@@ -110,6 +110,17 @@ PnL: {trade['pnl']}$ | {trade['pnl_percent']}%
     send_telegram_message(message)
 
 # =======================
+# 🟦 TRAILING START LOG
+# =======================
+def log_trailing_start(symbol: str, trailing_type: str = "Primary"):
+    """
+    Logs when a trailing monitor begins (Primary or Secondary).
+    This helps track when the trailing starts actively monitoring in Binance.
+    """
+    msg = f"🕐 {symbol}: <b>{trailing_type} Trailing Started Monitoring...</b>"
+    send_telegram_message(msg)
+
+# =======================
 # 📅 DAILY SUMMARY
 # =======================
 def send_daily_summary():
