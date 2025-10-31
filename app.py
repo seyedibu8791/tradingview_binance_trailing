@@ -19,8 +19,18 @@ from trade_notifier import (
     get_unrealized_pnl_pct     # <-- moved here
 )
 
-
+# =========================
+# Flask Initialization
+# =========================
 app = Flask(__name__)
+
+# =========================
+# GLOBAL STATE MANAGEMENT
+# =========================
+# Dictionary to store live trade info
+trades = {}
+
+# Thread lock for safe multi-threaded updates
 trades_lock = Lock()
 
 # --------- Binance signed request helper ----------
