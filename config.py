@@ -47,6 +47,15 @@ TS_HIGH_OFFSET_PCT      = float(os.getenv("TS_HIGH_OFFSET_PCT", "0.1"))       # 
 MAX_TRAILING_THREADS    = int(os.getenv("MAX_TRAILING_THREADS", "1"))         # One per symbol safeguard
 
 # ==============================
+# 🔹 ADVANCED TRAILING PARAMETERS
+# ==============================
+TRAILING_UPDATE_INTERVAL = int(os.getenv("TRAILING_UPDATE_INTERVAL", "2"))  # seconds between trailing checks
+DUAL_TRAILING_ENABLED    = os.getenv("DUAL_TRAILING_ENABLED", "True") == "True"
+TRAILING_DISTANCE_PCT    = float(os.getenv("TRAILING_DISTANCE_PCT", "0.3"))  # how far trailing lags from peak (%)
+TRAILING_COMPARE_PNL     = os.getenv("TRAILING_COMPARE_PNL", "True") == "True"
+
+
+# ==============================
 # 🔹 TELEGRAM CONFIGURATION
 # ==============================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8282710007:AAFbcLUwHRrMrBJ5VacJQQFM27qxdCplwO4")
