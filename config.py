@@ -22,6 +22,7 @@ else:
     BINANCE_SECRET_KEY = LIVE_SECRET_KEY
     BASE_URL           = LIVE_BASE_URL
 
+
 # ==============================
 # 🔹 TRADING PARAMETERS
 # ==============================
@@ -31,12 +32,14 @@ MARGIN_TYPE          = os.getenv("MARGIN_TYPE", "ISOLATED")     # CROSS or ISOLA
 MAX_ACTIVE_TRADES    = int(os.getenv("MAX_ACTIVE_TRADES", "5")) # Limit active trades
 OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", "3")) # Delay before opposite close & new entry
 
+
 # ==============================
 # 🔹 EXIT ORDER PARAMETERS
 # ==============================
 EXIT_MARKET_DELAY        = int(os.getenv("EXIT_MARKET_DELAY", "10"))  # Delay before market exit
 USE_BAR_HIGH_LOW_FOR_EXIT = os.getenv("USE_BAR_HIGH_LOW_FOR_EXIT", "False") == "True"  # Not used
 EXIT_LIMIT_TIMEOUT       = int(os.getenv("EXIT_LIMIT_TIMEOUT", "0"))  # Deprecated
+
 
 # ==============================
 # 🔹 TRAILING STOP PARAMETERS
@@ -45,6 +48,7 @@ TRAILING_ACTIVATION_PCT = float(os.getenv("TRAILING_ACTIVATION_PCT", "0.5"))  # 
 TS_LOW_OFFSET_PCT       = float(os.getenv("TS_LOW_OFFSET_PCT", "0.1"))        # Low offset
 TS_HIGH_OFFSET_PCT      = float(os.getenv("TS_HIGH_OFFSET_PCT", "0.1"))       # High offset
 MAX_TRAILING_THREADS    = int(os.getenv("MAX_TRAILING_THREADS", "1"))         # One per symbol safeguard
+
 
 # ==============================
 # 🔹 ADVANCED TRAILING PARAMETERS
@@ -63,10 +67,12 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "-1003281678423")
 
 DAILY_SUMMARY_TIME_IST = os.getenv("DAILY_SUMMARY_TIME_IST", "00:00")
 
+
 # ==============================
 # 🔹 LOGGING
 # ==============================
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # INFO, DEBUG, ERROR
+
 
 # ==============================
 # 🔹 CONFIG SUMMARY
@@ -81,6 +87,10 @@ Exit Market Delay:     {EXIT_MARKET_DELAY}s
 Trailing Activation:   {TRAILING_ACTIVATION_PCT}%
 Trailing Low Offset:   {TS_LOW_OFFSET_PCT}%
 Trailing High Offset:  {TS_HIGH_OFFSET_PCT}%
+Trailing Distance:     {TRAILING_DISTANCE_PCT}%
+Dual Trailing:         {DUAL_TRAILING_ENABLED}
+Compare PnL Mode:      {TRAILING_COMPARE_PNL}
+Update Interval:       {TRAILING_UPDATE_INTERVAL}s
 Opposite Close Delay:  {OPPOSITE_CLOSE_DELAY}s
 Max Active Trades:     {MAX_ACTIVE_TRADES}
 ------------------------------
