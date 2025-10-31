@@ -174,7 +174,7 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
 # 🟥 TRADE EXIT
 # =======================
 def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
-    """Send close notification and update trade record."""
+    """Send close notification and update trade record (with accurate live PnL fetch)."""
     t = trades.get(symbol)
     if not t or t.get("closed"):
         return
@@ -182,6 +182,7 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
     t["closed"] = True
     t["exit_price"] = filled_price
 
+    # --- Fetch live PnL percent from Binance ---
     live_pct = get_unrealized_pnl_pct(symbol)
     pnl_percent = live_pct if live_pct is not None else t.get("pnl_percent", 0.0)
     pnl_value = (pnl_percent / 100.0) * TRADE_AMOUNT
@@ -189,6 +190,7 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
     t["pnl"] = round(pnl_value, 2)
     t["pnl_percent"] = round(pnl_percent or 0.0, 2)
 
+    # --- Emoji mapping based on PnL ---
     if t["pnl_percent"] > 0:
         emoji = "💰✅"
     elif t["pnl_percent"] < 0:
@@ -196,15 +198,17 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
     else:
         emoji = "⚪️"
 
+    # --- Reason text mapping ---
     reason_text = {
         "STOP_LOSS": "🚨 Stoploss Triggered",
-        "FORCE_CLOSE": "⚠️ 2-Bar Loss Exit",
+        "FORCE_CLOSE": "⚠️ 2-Bar Forced Exit",
         "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
         "MARKET_CLOSE": "✅ Market Close",
         "SAME_DIRECTION_REENTRY": "🔁 Same-Direction Re-entry Close",
         "NORMAL": "✅ Normal Close"
     }.get(reason, reason)
 
+    # --- Telegram message ---
     msg = (
         f"{emoji} <b>{reason_text}</b>\n"
         f"┇#{symbol}\n"
@@ -212,6 +216,11 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
         f"┇PnL: <b>{t['pnl']}$</b> | {t['pnl_percent']}%\n"
         f"┇Reason: <i>{reason}</i>"
     )
+
+    # --- Highlight Forced Exit PnL ---
+    if reason in ["FORCE_CLOSE", "STOP_LOSS"]:
+        msg += f"\n┇<b>Force PnL</b>: {t['pnl_percent']}% ({t['pnl']}$)"
+
     send_telegram_message(msg)
 
 
@@ -219,12 +228,7 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
 # 📉 LOSS MONITOR
 # =======================
 def check_loss_conditions(symbol: str, current_price: float = None):
-    """
-    Evaluate ongoing trades for:
-      - Immediate stoploss (STOP_LOSS_PCT × LEVERAGE)
-      - 2-bar consecutive loss forced close
-      - Recovery resets loss_bars
-    """
+    """Evaluate ongoing trades for stoploss, 2-bar forced close, or recovery."""
     if symbol not in trades or trades[symbol].get("closed"):
         return
 
@@ -241,7 +245,6 @@ def check_loss_conditions(symbol: str, current_price: float = None):
         else:
             pnl_percent = ((entry - current_price) / entry) * 100 * LEVERAGE
 
-    # Immediate stop-loss threshold
     immediate_threshold = -(STOP_LOSS_PCT * LEVERAGE)
     if pnl_percent <= immediate_threshold and not t.get("forced_exit"):
         t["forced_exit"] = True
@@ -250,7 +253,6 @@ def check_loss_conditions(symbol: str, current_price: float = None):
         log_trade_exit(symbol, current_price or 0, reason="STOP_LOSS")
         return "STOP_LOSS"
 
-    # Consecutive loss bars
     if pnl_percent < 0:
         t["loss_bars"] = t.get("loss_bars", 0) + 1
         if t["loss_bars"] >= LOSS_BARS_LIMIT and not t.get("forced_exit"):
@@ -269,7 +271,7 @@ def check_loss_conditions(symbol: str, current_price: float = None):
 
 
 # =======================
-# 🕐 TRAILING & TRAIL COMPARISON
+# 🕐 TRAILING & COMPARISON
 # =======================
 def log_trailing_start(symbol: str, trailing_type: str = "Primary", extra: str = ""):
     txt = f"🕐 <b>#{symbol}</b>: {trailing_type} Trailing Activated"
