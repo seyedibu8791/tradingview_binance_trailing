@@ -624,7 +624,7 @@ def ping():
 def self_ping():
     while True:
         try:
-            requests.get(os.getenv("SELF_PING_URL", "https://tradingview-binance-trailing.onrender.com/ping"), timeout=5)
+            requests.get(os.getenv("SELF_PING_URL", "https://tradingview-binance-trailing-dhhf.onrender.com/ping"), timeout=5)
         except:
             pass
         time.sleep(5 * 60)
