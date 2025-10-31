@@ -17,9 +17,9 @@ from config import (
 # =======================
 # 📦 STORAGE
 # =======================
-# trade state stored by notifier for messaging & quick checks
-trades = {}             # { symbol: {side, entry_price, order_id, closed, exit_price, pnl, pnl_percent, loss_bars, forced_exit, recovered} }
+trades = {}              # { symbol: {side, entry_price, order_id, closed, exit_price, pnl, pnl_percent, loss_bars, forced_exit, recovered} }
 notified_orders = set()  # prevent duplicate entry notifications
+
 
 # =======================
 # 📢 TELEGRAM HELPER
@@ -39,6 +39,7 @@ def send_telegram_message(message: str):
     except Exception as e:
         print("❌ Telegram Exception:", e)
 
+
 # =======================
 # 🔑 BINANCE SIGNED HELPERS
 # =======================
@@ -53,6 +54,7 @@ def _signed_get(path: str, params: dict = None):
     resp.raise_for_status()
     return resp.json()
 
+
 def _signed_post(path: str, params: dict):
     params = params.copy()
     params["timestamp"] = int(time.time() * 1000)
@@ -62,6 +64,7 @@ def _signed_post(path: str, params: dict):
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     resp = requests.post(url, headers=headers, timeout=10)
     return resp.json()
+
 
 # =======================
 # 🔎 Position helpers
@@ -79,20 +82,20 @@ def get_position_info(symbol: str) -> Optional[dict]:
             print("⚠️ get_position_info error:", e)
         return None
 
+
 def get_unrealized_pnl_pct(symbol: str) -> Optional[float]:
     """
     Compute unrealized PnL% *including leverage* for the open position on symbol.
-    Formula used:
+    Formula:
       - For LONG: ((markPrice - entryPrice) / entryPrice) * 100 * LEVERAGE
       - For SHORT: ((entryPrice - markPrice) / entryPrice) * 100 * LEVERAGE
-    Returns rounded percent (float) or None on failure.
     """
     try:
         p = get_position_info(symbol)
         if not p:
             return None
         entry_price = float(p.get("entryPrice", 0) or 0)
-        mark_price = float(p.get("markPrice", 0) or p.get("markPrice", 0) or 0)
+        mark_price = float(p.get("markPrice", 0) or 0)
         pos_amt = float(p.get("positionAmt", 0))
         if entry_price == 0 or abs(pos_amt) == 0 or mark_price == 0:
             return None
@@ -106,14 +109,12 @@ def get_unrealized_pnl_pct(symbol: str) -> Optional[float]:
             print("⚠️ get_unrealized_pnl_pct error:", e)
         return None
 
+
 # =======================
 # 🔒 Close on Binance
 # =======================
 def close_trade_on_binance(symbol: str, side: str):
-    """
-    Force market close of the open position for symbol.
-    side = original side ("BUY"/"SELL") -> close with opposite MARKET order
-    """
+    """Force market close of the open position for symbol."""
     try:
         pos = get_position_info(symbol)
         if not pos:
@@ -131,13 +132,16 @@ def close_trade_on_binance(symbol: str, side: str):
         print("❌ close_trade_on_binance error:", e)
         return {"error": str(e)}
 
+
 # =======================
 # 🟩 TRADE ENTRY
 # =======================
 def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
-    """
-    Record entry and send Telegram notification. Prevent duplicate messages by order_id.
-    """
+    """Record entry and send Telegram notification. Prevent duplicate messages by order_id."""
+    # --- cleanup for same-direction re-entry ---
+    if symbol in trades and trades[symbol].get("closed"):
+        trades.pop(symbol, None)
+
     if order_id in notified_orders:
         return
     notified_orders.add(order_id)
@@ -165,14 +169,12 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
     )
     send_telegram_message(msg)
 
+
 # =======================
 # 🟥 TRADE EXIT
 # =======================
 def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
-    """
-    Send close notification and update trade record.
-    Prefer live unrealized PnL% fetched from Binance for accuracy.
-    """
+    """Send close notification and update trade record."""
     t = trades.get(symbol)
     if not t or t.get("closed"):
         return
@@ -199,6 +201,7 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
         "FORCE_CLOSE": "⚠️ 2-Bar Loss Exit",
         "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
         "MARKET_CLOSE": "✅ Market Close",
+        "SAME_DIRECTION_REENTRY": "🔁 Same-Direction Re-entry Close",
         "NORMAL": "✅ Normal Close"
     }.get(reason, reason)
 
@@ -211,6 +214,7 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
     )
     send_telegram_message(msg)
 
+
 # =======================
 # 📉 LOSS MONITOR
 # =======================
@@ -219,8 +223,7 @@ def check_loss_conditions(symbol: str, current_price: float = None):
     Evaluate ongoing trades for:
       - Immediate stoploss (STOP_LOSS_PCT × LEVERAGE)
       - 2-bar consecutive loss forced close
-      - Recovery (resets loss_bars)
-    Executes Binance market close when needed and notifies Telegram.
+      - Recovery resets loss_bars
     """
     if symbol not in trades or trades[symbol].get("closed"):
         return
@@ -228,7 +231,6 @@ def check_loss_conditions(symbol: str, current_price: float = None):
     t = trades[symbol]
     pnl_percent = get_unrealized_pnl_pct(symbol)
     if pnl_percent is None:
-        # If we can't fetch live pnl, fallback to using provided current_price (if any)
         if current_price is None:
             if DEBUG:
                 print(f"⚠️ No live PnL for {symbol} and no price provided.")
@@ -239,17 +241,16 @@ def check_loss_conditions(symbol: str, current_price: float = None):
         else:
             pnl_percent = ((entry - current_price) / entry) * 100 * LEVERAGE
 
-    # Immediate stop-loss threshold (config STOP_LOSS_PCT multiplied by LEVERAGE per spec)
+    # Immediate stop-loss threshold
     immediate_threshold = -(STOP_LOSS_PCT * LEVERAGE)
     if pnl_percent <= immediate_threshold and not t.get("forced_exit"):
         t["forced_exit"] = True
         send_telegram_message(f"🚨 <b>{symbol}</b> PnL {round(pnl_percent,2)}% ≤ −{STOP_LOSS_PCT}×{LEVERAGE} → Immediate Exit")
         close_trade_on_binance(symbol, t["side"])
-        # attempt to fetch a close price, but log with provided price if none (app.py will also call wait_and_notify_filled_exit)
         log_trade_exit(symbol, current_price or 0, reason="STOP_LOSS")
         return "STOP_LOSS"
 
-    # Consecutive loss bars logic
+    # Consecutive loss bars
     if pnl_percent < 0:
         t["loss_bars"] = t.get("loss_bars", 0) + 1
         if t["loss_bars"] >= LOSS_BARS_LIMIT and not t.get("forced_exit"):
@@ -259,7 +260,6 @@ def check_loss_conditions(symbol: str, current_price: float = None):
             log_trade_exit(symbol, current_price or 0, reason="FORCE_CLOSE")
             return "FORCE_CLOSE"
     else:
-        # Recovered — reset
         if t.get("loss_bars", 0) > 0:
             t["recovered"] = True
             send_telegram_message(f"💪 <b>{symbol}</b> recovered — Trailing Resumed")
@@ -267,26 +267,27 @@ def check_loss_conditions(symbol: str, current_price: float = None):
 
     return None
 
+
 # =======================
-# 🕐 TRAILING START & BEST-TRAIL HELPERS
+# 🕐 TRAILING & TRAIL COMPARISON
 # =======================
 def log_trailing_start(symbol: str, trailing_type: str = "Primary", extra: str = ""):
-    """Simple trailing activation notification."""
     txt = f"🕐 <b>#{symbol}</b>: {trailing_type} Trailing Activated"
     if extra:
         txt += f" ┇{extra}"
     send_telegram_message(txt)
 
+
 def notify_trail_comparison(symbol: str, primary_pct: float, secondary_pct: Optional[float]):
-    """Notify user about trail comparison and optionally recommend/close when difference large."""
     sec_text = f" | Secondary: {round(secondary_pct,2)}%" if secondary_pct is not None else ""
     send_telegram_message(f"⚖️ <b>#{symbol}</b> Trail PnL — Primary: {round(primary_pct,2)}%{sec_text}")
 
-    # If configured to compare and secondary is meaningfully worse, mention it (app.py will actually close)
     if TRAILING_COMPARE_PNL and secondary_pct is not None:
-        # threshold small margin to avoid noise; 0.3% default
         if primary_pct - secondary_pct >= 0.3:
-            send_telegram_message(f"🎯 <b>#{symbol}</b> Primary protects more — prefer Primary stop (diff {round(primary_pct-secondary_pct,2)}%)")
+            send_telegram_message(
+                f"🎯 <b>#{symbol}</b> Primary protects more — prefer Primary stop (diff {round(primary_pct-secondary_pct,2)}%)"
+            )
+
 
 # =======================
 # 📊 DAILY SUMMARY THREAD
@@ -321,10 +322,11 @@ def send_daily_summary():
         )
         send_telegram_message(msg)
 
-        # keep the trades map for audit but clear closed trades
+        # cleanup closed trades
         for s in list(trades.keys()):
             if trades[s].get("closed"):
                 trades.pop(s, None)
 
-# start daily summary thread
+
+# start background summary thread
 threading.Thread(target=send_daily_summary, daemon=True).start()
