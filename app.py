@@ -1,25 +1,24 @@
 from flask import Flask, request, jsonify
-import requests
-import hmac
-import hashlib
-import time
-import threading
-import os
+import requests, hmac, hashlib, time, threading, os
 from threading import Lock
 
-# import config values
+# --- Local imports ---
 from config import (
     BINANCE_API_KEY, BINANCE_SECRET_KEY, BASE_URL,
     TRADE_AMOUNT, LEVERAGE, MARGIN_TYPE, MAX_ACTIVE_TRADES,
-    EXIT_MARKET_DELAY, OPPOSITE_CLOSE_DELAY,
-    TRAILING_ACTIVATION_PCT, TS_LOW_OFFSET_PCT, TS_HIGH_OFFSET_PCT,
-    TRAILING_UPDATE_INTERVAL, DUAL_TRAILING_ENABLED, TRAILING_DISTANCE_PCT, TRAILING_COMPARE_PNL
+    EXIT_MARKET_DELAY, OPPOSITE_CLOSE_DELAY, STOP_LOSS_PCT,
+    LOSS_BARS_LIMIT, DEBUG
 )
 
-# import notifier helpers
+# ✅ import from trade_notifier, not config
 from trade_notifier import (
-    send_telegram_message, log_trade_entry, log_trade_exit, log_trailing_start, trades
+    log_trade_entry,
+    log_trade_exit,
+    check_loss_conditions,
+    send_telegram_message,
+    get_unrealized_pnl_pct     # <-- moved here
 )
+
 
 app = Flask(__name__)
 trades_lock = Lock()
