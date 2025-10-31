@@ -546,7 +546,7 @@ def async_exit_and_open(symbol, new_side, entry_price):
                 existing = trades.get(symbol)
             if existing and not existing.get("closed", True):
                 existing_side = existing.get("side")
-                print(f"🔄 Opposite signal detected — forcing market close for {symbol} ({existing_side})")
+                print(f"🔄 Existing active — forcing market close for {symbol} ({existing_side}) to replace with {new_side}")
                 execute_market_exit(symbol, existing_side)
                 time.sleep(OPPOSITE_CLOSE_DELAY)
             open_position(symbol, new_side, entry_price)
@@ -576,22 +576,18 @@ def webhook():
         if comment == "BUY_ENTRY":
             with trades_lock:
                 existing = trades.get(symbol)
+            # If there's an active trade (any side), force close and re-open with BUY
             if existing and not existing.get("closed", True):
-                if existing.get("side", "").upper() == "BUY":
-                    print(f"ℹ️ BUY_ENTRY ignored for {symbol} (same direction active).")
-                else:
-                    async_exit_and_open(symbol, "BUY", close_price)
+                async_exit_and_open(symbol, "BUY", close_price)
             else:
                 open_position(symbol, "BUY", close_price)
 
         elif comment == "SELL_ENTRY":
             with trades_lock:
                 existing = trades.get(symbol)
+            # If there's an active trade (any side), force close and re-open with SELL
             if existing and not existing.get("closed", True):
-                if existing.get("side", "").upper() == "SELL":
-                    print(f"ℹ️ SELL_ENTRY ignored for {symbol} (same direction active).")
-                else:
-                    async_exit_and_open(symbol, "SELL", close_price)
+                async_exit_and_open(symbol, "SELL", close_price)
             else:
                 open_position(symbol, "SELL", close_price)
 
