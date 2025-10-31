@@ -360,7 +360,7 @@ def monitor_trailing_and_exit(symbol, side):
 
         # prefer live unrealized pnl percent from config helper
         try:
-            from config import get_unrealized_pnl_pct
+            from trade_notifier import get_unrealized_pnl_pct
             pnl_percent = get_unrealized_pnl_pct(symbol) or 0.0
         except Exception:
             # fallback local calc
