@@ -1,9 +1,13 @@
-# app.py (Final)
 from flask import Flask, request, jsonify
-import requests, hmac, hashlib, time, threading, os
+import requests
+import hmac
+import hashlib
+import time
+import threading
+import os
 from threading import Lock
 
-# import config values (ensure config.py matches these names)
+# import config values
 from config import (
     BINANCE_API_KEY, BINANCE_SECRET_KEY, BASE_URL,
     TRADE_AMOUNT, LEVERAGE, MARGIN_TYPE, MAX_ACTIVE_TRADES,
@@ -12,8 +16,10 @@ from config import (
     TRAILING_UPDATE_INTERVAL, DUAL_TRAILING_ENABLED, TRAILING_DISTANCE_PCT, TRAILING_COMPARE_PNL
 )
 
-# import notifier helpers (ensure trade_notifier.py defines these)
-from trade_notifier import send_telegram_message, log_trade_entry, log_trade_exit, log_trailing_start, trades
+# import notifier helpers
+from trade_notifier import (
+    send_telegram_message, log_trade_entry, log_trade_exit, log_trailing_start, trades
+)
 
 app = Flask(__name__)
 trades_lock = Lock()
@@ -141,7 +147,10 @@ def open_position(symbol, side, limit_price):
                     },
                     "final": "primary"
                 },
-                "trailing_monitor_started": False
+                "trailing_monitor_started": False,
+                # LOSS CONTROL fields
+                "loss_bars": 0,
+                "forced_exit": False
             }
 
     resp = binance_signed_request("POST", "/fapi/v1/order", {
@@ -188,11 +197,10 @@ def wait_and_notify_filled_entry(symbol, side, order_id):
                 trades[symbol]["trails"]["secondary"]["peak"] = avg_price
                 trades[symbol]["trails"]["secondary"]["trough"] = avg_price
 
-            # notify via trade_notifier (old entry message is already sent, but this confirms fill)
+            # notify via trade_notifier
             try:
                 log_trade_entry(symbol, side, order_id, avg_price)
             except Exception:
-                # if log_trade_entry not present or differs, fallback to send_telegram_message
                 send_telegram_message(f"📩 Filled: {symbol} | {side} | {avg_price}")
 
             # ensure trailing monitor is running (single monitor safeguard)
@@ -249,7 +257,8 @@ def wait_and_notify_filled_exit(symbol, order_id):
                     trades[symbol]["closed"] = True
                     trades[symbol]["trailing_monitor_started"] = False
             try:
-                log_trade_exit(symbol, filled_price)
+                # call notifier's flexible log_trade_exit
+                log_trade_exit(symbol, filled_price, reason="MARKET_CLOSE")
             except Exception:
                 send_telegram_message(f"💰 Closed {symbol} | Exit: {filled_price}")
             clean_residual_positions(symbol)
@@ -307,12 +316,17 @@ def monitor_trailing_and_exit(symbol, side):
     Single monitor per symbol. Maintains primary and optionally secondary trails.
     Selects final trail by locked PnL (USD) if TRAILING_COMPARE_PNL True, else by locked_pnl_pct.
     Closes in market when final stop is hit.
+
+    Also includes loss-control:
+    - Immediate Stoploss: if pnl_percent <= -STOP_LOSS_PCT * LEVERAGE => immediate market exit
+    - Consecutive negative checks: increments loss_bars when pnl < 0; when loss_bars >= LOSS_BARS_LIMIT => force close
+    - Recovery: if pnl >= 0 after being negative, reset loss_bars and notify recovery
     """
     print(f"🛰️ Trailing monitor started for {symbol} (side: {side})")
     start_time = time.time()
     max_run = max(60, int(os.getenv("MAX_TRAILING_RUNTIME_MIN", "120"))) * 60  # safety cap in seconds
 
-    # announce primary trail start (already announced earlier on fill, but keep idempotent)
+    # announce primary trail start
     try:
         log_trailing_start(symbol, "primary")
     except Exception:
@@ -336,13 +350,73 @@ def monitor_trailing_and_exit(symbol, side):
             trade = trades[symbol]
             entry_price = float(trade.get("entry_price", 0))
             trails = trade.setdefault("trails", {})
+            # loss metadata
+            loss_bars = trade.get("loss_bars", 0)
 
         current = get_current_price(symbol)
         if current <= 0:
             time.sleep(1)
             continue
 
-        # Ensure primary exists
+        # prefer live unrealized pnl percent from config helper
+        try:
+            from config import get_unrealized_pnl_pct
+            pnl_percent = get_unrealized_pnl_pct(symbol) or 0.0
+        except Exception:
+            # fallback local calc
+            if side.upper() == "BUY":
+                pnl_percent = ((current - entry_price) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
+            else:
+                pnl_percent = ((entry_price - current) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
+
+        # --------- LOSS CONTROL: Immediate Stoploss ----------
+        try:
+            immediate_threshold = -STOP_LOSS_PCT * LEVERAGE
+            if pnl_percent <= immediate_threshold and not trade.get("forced_exit", False):
+                with trades_lock:
+                    trades[symbol]["forced_exit"] = True
+                msg = (f"🚨 Immediate Stoploss Triggered for {symbol} | PnL%: {round(pnl_percent,2)} "
+                       f"<= -{STOP_LOSS_PCT} x {LEVERAGE} => closing market position.")
+                try:
+                    log_trade_exit(symbol, current, reason="STOP_LOSS")
+                except Exception:
+                    send_telegram_message(msg)
+                execute_market_exit(symbol, side)
+                return
+        except Exception as e:
+            print("❌ Immediate stoploss check error:", e)
+
+        # --------- LOSS CONTROL: Consecutive negative bars & recovery logic ----------
+        try:
+            with trades_lock:
+                trade = trades[symbol]
+                if pnl_percent < 0:
+                    trade["loss_bars"] = trade.get("loss_bars", 0) + 1
+                    if trade["loss_bars"] >= LOSS_BARS_LIMIT and not trade.get("forced_exit", False):
+                        trade["forced_exit"] = True
+                        msg = (f"⚠️ Consecutive-Loss Exit for {symbol} | Loss bars: {trade['loss_bars']} "
+                               f"| PnL%: {round(pnl_percent,2)} — executing market close.")
+                        try:
+                            log_trade_exit(symbol, current, reason="FORCE_CLOSE")
+                        except Exception:
+                            send_telegram_message(msg)
+                        execute_market_exit(symbol, side)
+                        return
+                else:
+                    # recovered (pnl >= 0)
+                    if trade.get("loss_bars", 0) > 0:
+                        trade["loss_bars"] = 0
+                        if trade.get("forced_exit", False):
+                            trade["forced_exit"] = False
+                        recovery_msg = (f"✅ Recovered — Trailing resumed for {symbol} | PnL%: {round(pnl_percent,2)}")
+                        try:
+                            log_trailing_start(symbol, "recovered")
+                        except Exception:
+                            send_telegram_message(recovery_msg)
+        except Exception as e:
+            print("❌ Consecutive-loss/recovery logic error:", e)
+
+        # Ensure primary/secondary trails present
         if "primary" not in trails:
             trails["primary"] = {
                 "active": True,
@@ -366,7 +440,7 @@ def monitor_trailing_and_exit(symbol, side):
                 "locked_pnl_pct": 0.0
             }
 
-        # Update both trails
+        # Update trails
         for key in ("primary", "secondary"):
             t = trails[key]
             if not t.get("active"):
@@ -378,7 +452,6 @@ def monitor_trailing_and_exit(symbol, side):
                 activated = profit_pct >= t.get("activation_pct", TRAILING_ACTIVATION_PCT)
                 if activated:
                     ts = compute_ts_dynamic(abs(profit_pct))
-                    # allow override distance_pct fallback
                     distance_pct = t.get("distance_pct") or ts
                     stop_price = t["peak"] * (1 - distance_pct / 100)
                     t["stop"] = round(stop_price, 8)
@@ -397,13 +470,12 @@ def monitor_trailing_and_exit(symbol, side):
                     usd, pct = compute_locked_pnl(entry_price, t["stop"], side)
                     t["locked_pnl_usd"], t["locked_pnl_pct"] = usd, pct
 
-        # Choose final trail (based on config)
+        # Choose final trail and check final stop trigger (as before)
         with trades_lock:
             p = trails["primary"]
             s = trails["secondary"]
             p_locked = p.get("locked_pnl_usd", 0.0)
             s_locked = s.get("locked_pnl_usd", -999999.0) if s.get("active") else -999999.0
-            # prefer whichever gives higher USD PnL when TRAILING_COMPARE_PNL True, else by percentage
             if TRAILING_COMPARE_PNL:
                 final_key = "secondary" if (s.get("active") and s_locked > p_locked) else "primary"
             else:
@@ -413,7 +485,6 @@ def monitor_trailing_and_exit(symbol, side):
             final_stop = trails[final_key].get("stop")
             trades[symbol]["trails"]["final"] = final_key
 
-        # if final stop exists, check trigger
         if final_stop:
             if side.upper() == "BUY" and current <= final_stop:
                 print(f"🔔 Final stop ({final_key}) hit for LONG {symbol} current={current}, stop={final_stop}")
@@ -434,7 +505,6 @@ def async_exit_and_open(symbol, new_side, entry_price):
                 existing = trades.get(symbol)
             if existing and not existing.get("closed", True):
                 existing_side = existing.get("side")
-                # force-close existing
                 print(f"🔄 Opposite signal detected — forcing market close for {symbol} ({existing_side})")
                 execute_market_exit(symbol, existing_side)
                 time.sleep(OPPOSITE_CLOSE_DELAY)
@@ -495,12 +565,10 @@ def webhook():
                         cp = get_current_price(symbol) or close_price
                         sec["peak"] = cp
                         sec["trough"] = cp
-                        # notify secondary trailing start
                         try:
                             log_trailing_start(symbol, "secondary")
                         except Exception:
                             send_telegram_message(f"🛰️ Starting 2nd trailing monitor for {symbol} (exit signal detected)")
-                    # ensure monitor running
                     if not trades[symbol].get("trailing_monitor_started"):
                         trades[symbol]["trailing_monitor_started"] = True
                         threading.Thread(target=monitor_trailing_and_exit, args=(symbol, "BUY"), daemon=True).start()
