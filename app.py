@@ -150,7 +150,7 @@ def open_position(symbol, side, limit_price):
                     "secondary": {
                         "active": False,
                         "activation_pct": TRAILING_ACTIVATION_PCT/2,
-                        "distance_pct": TS_LOW_OFFSET_PCT/2,
+                        "distance_pct": TS_HIGH_OFFSET_PCT,  # use TS_HIGH for secondary by default
                         "peak": limit_price,
                         "trough": limit_price,
                         "stop": None,
@@ -326,13 +326,10 @@ def compute_locked_pnl(entry_price, stop_price, side):
 def monitor_trailing_and_exit(symbol, side):
     """
     Single monitor per symbol. Maintains primary and optionally secondary trails.
-    Selects final trail by locked PnL (USD) if TRAILING_COMPARE_PNL True, else by locked_pnl_pct.
-    Closes in market when final stop is hit.
-
-    Also includes loss-control:
-    - Immediate Stoploss: if pnl_percent <= -STOP_LOSS_PCT * LEVERAGE => immediate market exit
-    - Consecutive negative checks: increments loss_bars when pnl < 0; when loss_bars >= LOSS_BARS_LIMIT => force close
-    - Recovery: if pnl >= 0 after being negative, reset loss_bars and notify recovery
+    Uses unified best-stop logic with auto-tighten for secondary:
+      - best_stop = max(stop1, stop2) for BUY (min for SELL)
+      - secondary.stop is auto-tightened to not be looser than primary
+    Also includes loss-control and other existing functionality.
     """
     print(f"🛰️ Trailing monitor started for {symbol} (side: {side})")
     start_time = time.time()
@@ -370,9 +367,8 @@ def monitor_trailing_and_exit(symbol, side):
             time.sleep(1)
             continue
 
-        # prefer live unrealized pnl percent from config helper
+        # prefer live unrealized pnl percent from notifier helper
         try:
-            from trade_notifier import get_unrealized_pnl_pct
             pnl_percent = get_unrealized_pnl_pct(symbol) or 0.0
         except Exception:
             # fallback local calc
@@ -444,7 +440,7 @@ def monitor_trailing_and_exit(symbol, side):
             trails["secondary"] = {
                 "active": False,
                 "activation_pct": TRAILING_ACTIVATION_PCT/2,
-                "distance_pct": TS_LOW_OFFSET_PCT/2,
+                "distance_pct": TS_HIGH_OFFSET_PCT,
                 "peak": entry_price,
                 "trough": entry_price,
                 "stop": None,
@@ -452,24 +448,27 @@ def monitor_trailing_and_exit(symbol, side):
                 "locked_pnl_pct": 0.0
             }
 
-        # Update trails
+        # Update both trails
         for key in ("primary", "secondary"):
             t = trails[key]
             if not t.get("active"):
                 continue
             if side.upper() == "BUY":
+                # update peak
                 if current > t["peak"]:
                     t["peak"] = current
                 profit_pct = (t["peak"] - entry_price) / entry_price * 100 if entry_price > 0 else 0
                 activated = profit_pct >= t.get("activation_pct", TRAILING_ACTIVATION_PCT)
                 if activated:
                     ts = compute_ts_dynamic(abs(profit_pct))
+                    # prefer explicit distance_pct, else computed ts
                     distance_pct = t.get("distance_pct") or ts
                     stop_price = t["peak"] * (1 - distance_pct / 100)
                     t["stop"] = round(stop_price, 8)
                     usd, pct = compute_locked_pnl(entry_price, t["stop"], side)
                     t["locked_pnl_usd"], t["locked_pnl_pct"] = usd, pct
             else:  # SELL
+                # update trough
                 if current < t["trough"]:
                     t["trough"] = current
                 profit_pct = (entry_price - t["trough"]) / entry_price * 100 if entry_price > 0 else 0
@@ -482,28 +481,58 @@ def monitor_trailing_and_exit(symbol, side):
                     usd, pct = compute_locked_pnl(entry_price, t["stop"], side)
                     t["locked_pnl_usd"], t["locked_pnl_pct"] = usd, pct
 
-        # Choose final trail and check final stop trigger (as before)
+        # --------- Unified "best stop" & auto-tighten secondary ----------
         with trades_lock:
-            p = trails["primary"]
-            s = trails["secondary"]
-            p_locked = p.get("locked_pnl_usd", 0.0)
-            s_locked = s.get("locked_pnl_usd", -999999.0) if s.get("active") else -999999.0
-            if TRAILING_COMPARE_PNL:
-                final_key = "secondary" if (s.get("active") and s_locked > p_locked) else "primary"
-            else:
-                p_pct = p.get("locked_pnl_pct", 0.0)
-                s_pct = s.get("locked_pnl_pct", -9999.0) if s.get("active") else -9999.0
-                final_key = "secondary" if (s.get("active") and s_pct > p_pct) else "primary"
-            final_stop = trails[final_key].get("stop")
-            trades[symbol]["trails"]["final"] = final_key
+            p = trails.get("primary", {})
+            s = trails.get("secondary", {})
+            stop1 = p.get("stop")
+            stop2 = s.get("stop") if s.get("active") else None
 
+            # determine best_stop depending on side
+            stop_candidates = []
+            if stop1:
+                stop_candidates.append(("primary", stop1))
+            if stop2:
+                stop_candidates.append(("secondary", stop2))
+
+            if not stop_candidates:
+                # no active stops yet
+                time.sleep(max(1, TRAILING_UPDATE_INTERVAL))
+                continue
+
+            if side.upper() == "BUY":
+                # best_stop is the maximum stop among candidates (protects more profit)
+                best_key, best_stop = max(stop_candidates, key=lambda x: x[1])
+                # auto-tighten secondary: ensure secondary stop is not lower than primary
+                if s.get("active") and stop1 and (s.get("stop", 0) < stop1):
+                    s["stop"] = stop1
+                    s["locked_pnl_usd"], s["locked_pnl_pct"] = compute_locked_pnl(entry_price, s["stop"], side)
+                    # update candidate to reflect tightening
+                    if ("secondary", stop2) in stop_candidates:
+                        stop_candidates = [("primary", stop1), ("secondary", s["stop"])]
+                        best_key, best_stop = max(stop_candidates, key=lambda x: x[1])
+            else:
+                # SELL side: best_stop is min (lower stop protects more profit on shorts)
+                best_key, best_stop = min(stop_candidates, key=lambda x: x[1])
+                if s.get("active") and stop1 and (s.get("stop", 0) > stop1):
+                    s["stop"] = stop1
+                    s["locked_pnl_usd"], s["locked_pnl_pct"] = compute_locked_pnl(entry_price, s["stop"], side)
+                    if ("secondary", stop2) in stop_candidates:
+                        stop_candidates = [("primary", stop1), ("secondary", s["stop"])]
+                        best_key, best_stop = min(stop_candidates, key=lambda x: x[1])
+
+            # store which trail contributed to best_stop
+            trades[symbol]["trails"]["final"] = best_key
+            final_stop = best_stop
+
+        # --------- Final stop check and close ----------
         if final_stop:
             if side.upper() == "BUY" and current <= final_stop:
-                print(f"🔔 Final stop ({final_key}) hit for LONG {symbol} current={current}, stop={final_stop}")
+                print(f"🔔 Final unified stop hit for LONG {symbol} current={current}, stop={final_stop}")
                 execute_market_exit(symbol, side)
                 return
             elif side.upper() == "SELL" and current >= final_stop:
-                print(f"🔔 Final stop ({final_key}) hit for SHORT {symbol} current={current}, stop={final_stop}")
+                print(f"🔔 Final unified stop hit for SHORT {symbol} current={current}, stop={final_stop}")
                 execute_market_exit(symbol, side)
                 return
 
@@ -577,6 +606,7 @@ def webhook():
                         cp = get_current_price(symbol) or close_price
                         sec["peak"] = cp
                         sec["trough"] = cp
+                        sec["distance_pct"] = TS_HIGH_OFFSET_PCT
                         try:
                             log_trailing_start(symbol, "secondary")
                         except Exception:
@@ -597,6 +627,7 @@ def webhook():
                         cp = get_current_price(symbol) or close_price
                         sec["peak"] = cp
                         sec["trough"] = cp
+                        sec["distance_pct"] = TS_HIGH_OFFSET_PCT
                         try:
                             log_trailing_start(symbol, "secondary")
                         except Exception:
