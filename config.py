@@ -25,33 +25,33 @@ else:
 # ==============================
 # 🔹 TRADING PARAMETERS
 # ==============================
-TRADE_AMOUNT        = float(os.getenv("TRADE_AMOUNT", "50"))   # USD per trade
-LEVERAGE            = int(os.getenv("LEVERAGE", "20"))         # Leverage multiplier
-MARGIN_TYPE         = os.getenv("MARGIN_TYPE", "ISOLATED")     # CROSS or ISOLATED
-MAX_ACTIVE_TRADES   = int(os.getenv("MAX_ACTIVE_TRADES", "5")) # Limit active trades
-OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", "3")) # Delay between opposite close & new entry
+TRADE_AMOUNT         = float(os.getenv("TRADE_AMOUNT", "50"))   # USD per trade
+LEVERAGE             = int(os.getenv("LEVERAGE", "20"))         # Leverage multiplier
+MARGIN_TYPE          = os.getenv("MARGIN_TYPE", "ISOLATED")     # CROSS or ISOLATED
+MAX_ACTIVE_TRADES    = int(os.getenv("MAX_ACTIVE_TRADES", "5")) # Limit active trades
+OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", "3")) # Delay before opposite close & new entry
 
 # ==============================
 # 🔹 EXIT ORDER PARAMETERS
 # ==============================
-EXIT_MARKET_DELAY       = int(os.getenv("EXIT_MARKET_DELAY", "10"))  # Delay before market exit
-USE_BAR_HIGH_LOW_FOR_EXIT = os.getenv("USE_BAR_HIGH_LOW_FOR_EXIT", "False") == "True"  # Not used now (disabled)
-EXIT_LIMIT_TIMEOUT      = int(os.getenv("EXIT_LIMIT_TIMEOUT", "0"))   # Deprecated
+EXIT_MARKET_DELAY        = int(os.getenv("EXIT_MARKET_DELAY", "10"))  # Delay before market exit
+USE_BAR_HIGH_LOW_FOR_EXIT = os.getenv("USE_BAR_HIGH_LOW_FOR_EXIT", "False") == "True"  # Not used
+EXIT_LIMIT_TIMEOUT       = int(os.getenv("EXIT_LIMIT_TIMEOUT", "0"))  # Deprecated
 
 # ==============================
 # 🔹 TRAILING STOP PARAMETERS
 # ==============================
-TRAILING_ACTIVATION_PCT = float(os.getenv("TRAILING_ACTIVATION_PCT", "0.5"))  # Activation threshold (tsi)
-TS_LOW_OFFSET_PCT       = float(os.getenv("TS_LOW_OFFSET_PCT", "0.1"))        # ts_low_profit
-TS_HIGH_OFFSET_PCT      = float(os.getenv("TS_HIGH_OFFSET_PCT", "0.1"))       # ts_high_profit
+TRAILING_ACTIVATION_PCT = float(os.getenv("TRAILING_ACTIVATION_PCT", "0.5"))  # Activation threshold
+TS_LOW_OFFSET_PCT       = float(os.getenv("TS_LOW_OFFSET_PCT", "0.1"))        # Low offset
+TS_HIGH_OFFSET_PCT      = float(os.getenv("TS_HIGH_OFFSET_PCT", "0.1"))       # High offset
+MAX_TRAILING_THREADS    = int(os.getenv("MAX_TRAILING_THREADS", "1"))         # One per symbol safeguard
 
 # ==============================
-# 🔹 TELEGRAM & SUMMARY CONFIG
+# 🔹 TELEGRAM CONFIGURATION
 # ==============================
-TELEGRAM_BOT_TOKEN = "8282710007:AAFbcLUwHRrMrBJ5VacJQQFM27qxdCplwO4"
-TELEGRAM_CHAT_ID   = "-1003281678423"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8282710007:AAFbcLUwHRrMrBJ5VacJQQFM27qxdCplwO4")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "-1003281678423")
 
-# Daily summary time in IST (HH:MM format)
 DAILY_SUMMARY_TIME_IST = os.getenv("DAILY_SUMMARY_TIME_IST", "00:00")
 
 # ==============================
