@@ -2,7 +2,10 @@ import requests
 import threading
 import time
 import datetime
-from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TRADE_AMOUNT, LEVERAGE
+from config import (
+    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+    TRADE_AMOUNT, LEVERAGE, STOP_LOSS_PCT, LOSS_BARS_LIMIT
+)
 
 # =======================
 # 🧾 STORAGE
@@ -30,7 +33,7 @@ def send_telegram_message(message: str):
 # 🟩 TRADE ENTRY
 # =======================
 def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
-    """Log entry when Binance confirms fill (even partial)"""
+    """Log entry when Binance confirms fill"""
     if order_id in notified_orders:
         return
     notified_orders.add(order_id)
@@ -43,6 +46,8 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
         "exit_price": None,
         "pnl": 0,
         "pnl_percent": 0,
+        "loss_bars": 0,  # Track how many bars in loss
+        "forced_exit": False
     }
 
     arrow = "⬆️" if side.upper() == "BUY" else "⬇️"
@@ -57,15 +62,15 @@ Trade Amount: {TRADE_AMOUNT}$
 --- ⌁ ---
 Entry Price: <b>{filled_price}</b>
 --- ⌁ ---
-🕐 Trailing Monitor Started...
+🕐 Trailing & Risk Monitor Started...
 """
     send_telegram_message(message)
 
 # =======================
 # 🟥 TRADE EXIT
 # =======================
-def log_trade_exit(symbol: str, order_id: str, filled_price: float):
-    """Send final Telegram message when position closes in Binance"""
+def log_trade_exit(symbol: str, order_id: str, filled_price: float, reason: str = "NORMAL"):
+    """Send Telegram message when trade closes"""
     if symbol not in trades:
         trades[symbol] = {
             "side": "UNKNOWN",
@@ -74,16 +79,20 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
             "exit_price": filled_price,
             "pnl": 0,
             "pnl_percent": 0,
+            "forced_exit": True
         }
 
     trade = trades[symbol]
+    if trade.get("closed"):
+        return
+
     trade["exit_price"] = filled_price
     trade["closed"] = True
-
     entry_price = trade["entry_price"]
     side = trade["side"].upper()
     qty = TRADE_AMOUNT
 
+    # Calculate PnL
     if side == "BUY":
         pnl = (filled_price - entry_price) * qty * LEVERAGE / entry_price
         pnl_percent = ((filled_price - entry_price) / entry_price) * 100 * LEVERAGE
@@ -96,7 +105,14 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
     trade["pnl"] = round(pnl, 2)
     trade["pnl_percent"] = round(pnl_percent, 2)
 
-    header = "✅ Profit Achieved!" if pnl >= 0 else "⛔️ Ended in Loss!"
+    if reason == "STOP_LOSS":
+        header = "🚨 Stop Loss Triggered!"
+    elif reason == "FORCE_CLOSE":
+        header = "⚠️ 2-Bar Loss Closure Executed!"
+    elif pnl >= 0:
+        header = "✅ Profit Achieved!"
+    else:
+        header = "⛔️ Ended in Loss!"
 
     message = f"""{header}
 Symbol: <b>#{symbol}</b>
@@ -106,17 +122,51 @@ Entry: {entry_price}
 Exit: {filled_price}
 --- ⌁ ---
 PnL: {trade['pnl']}$ | {trade['pnl_percent']}%
+Reason: <b>{reason}</b>
 """
     send_telegram_message(message)
+
+# =======================
+# 🟦 LOSS MONITOR
+# =======================
+def check_loss_conditions(symbol: str, current_price: float):
+    """Evaluate ongoing trades for loss/stoploss conditions"""
+    if symbol not in trades or trades[symbol]["closed"]:
+        return
+
+    trade = trades[symbol]
+    entry = trade["entry_price"]
+    side = trade["side"].upper()
+
+    # Calculate current % PnL
+    if side == "BUY":
+        pnl_percent = ((current_price - entry) / entry) * 100 * LEVERAGE
+    else:
+        pnl_percent = ((entry - current_price) / entry) * 100 * LEVERAGE
+
+    # --- Stop Loss Check ---
+    if pnl_percent <= -STOP_LOSS_PCT:
+        trade["forced_exit"] = True
+        log_trade_exit(symbol, trade["order_id"], current_price, reason="STOP_LOSS")
+        return "STOP_LOSS"
+
+    # --- Consecutive Loss Bars ---
+    if pnl_percent < 0:
+        trade["loss_bars"] += 1
+        if trade["loss_bars"] >= LOSS_BARS_LIMIT:
+            trade["forced_exit"] = True
+            log_trade_exit(symbol, trade["order_id"], current_price, reason="FORCE_CLOSE")
+            return "FORCE_CLOSE"
+    else:
+        # Reset loss counter if back to profit
+        trade["loss_bars"] = 0
+
+    return None
 
 # =======================
 # 🟦 TRAILING START LOG
 # =======================
 def log_trailing_start(symbol: str, trailing_type: str = "Primary"):
-    """
-    Logs when a trailing monitor begins (Primary or Secondary).
-    This helps track when the trailing starts actively monitoring in Binance.
-    """
     msg = f"🕐 {symbol}: <b>{trailing_type} Trailing Started Monitoring...</b>"
     send_telegram_message(msg)
 
