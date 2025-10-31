@@ -8,7 +8,7 @@ from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TRADE_AMOUNT, LEVERAGE
 # 🧾 STORAGE
 # =======================
 trades = {}  # {symbol: {...}}
-notified_orders = set()  # prevent duplicate entry messages
+notified_orders = set()  # prevent duplicate entries
 
 # =======================
 # 📢 TELEGRAM HELPER
@@ -30,7 +30,7 @@ def send_telegram_message(message: str):
 # 🟩 TRADE ENTRY
 # =======================
 def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float):
-    """Record and notify trade entry when order is FILLED"""
+    """Log entry when Binance confirms fill (even partial)"""
     if order_id in notified_orders:
         return
     notified_orders.add(order_id)
@@ -57,7 +57,7 @@ Trade Amount: {TRADE_AMOUNT}$
 --- ⌁ ---
 Entry Price: <b>{filled_price}</b>
 --- ⌁ ---
-🕐 Monitoring for Exit (Trailing Active)...
+🕐 Trailing Monitor Started...
 """
     send_telegram_message(message)
 
@@ -65,7 +65,7 @@ Entry Price: <b>{filled_price}</b>
 # 🟥 TRADE EXIT
 # =======================
 def log_trade_exit(symbol: str, order_id: str, filled_price: float):
-    """Record and notify trade exit"""
+    """Send final Telegram message when position closes in Binance"""
     if symbol not in trades:
         trades[symbol] = {
             "side": "UNKNOWN",
@@ -99,12 +99,13 @@ def log_trade_exit(symbol: str, order_id: str, filled_price: float):
     header = "✅ Profit Achieved!" if pnl >= 0 else "⛔️ Ended in Loss!"
 
     message = f"""{header}
-PnL: {trade['pnl']}$ | {trade['pnl_percent']}%
---- ⌁ ---
 Symbol: <b>#{symbol}</b>
+Side: <b>{side}</b>
 --- ⌁ ---
-Entry: {trade['entry_price']}
-Exit: {trade['exit_price']}
+Entry: {entry_price}
+Exit: {filled_price}
+--- ⌁ ---
+PnL: {trade['pnl']}$ | {trade['pnl_percent']}%
 """
     send_telegram_message(message)
 
@@ -112,9 +113,9 @@ Exit: {trade['exit_price']}
 # 📅 DAILY SUMMARY
 # =======================
 def send_daily_summary():
-    """Send end-of-day summary automatically (00:00 IST)"""
+    """Auto-send EOD summary"""
     while True:
-        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5.5)))  # IST
+        now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5.5)))
         next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
         time.sleep((next_run - now).total_seconds())
 
@@ -136,10 +137,10 @@ def send_daily_summary():
 ➕ Total Trades: {total_signals}
 ✔️ Profitable: {profitable}
 ✖️ Lost: {lost}
-◼️ Open: {open_trades}
-💰 Net PnL %: {net_pnl_percent}%"""
+◼️ Open Trades: {open_trades}
+✅ Net PnL %: {net_pnl_percent}%"""
         send_telegram_message(summary_msg)
         trades.clear()
 
-# Start summary thread automatically
+# Start summary thread
 threading.Thread(target=send_daily_summary, daemon=True).start()
