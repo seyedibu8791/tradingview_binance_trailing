@@ -545,11 +545,9 @@ def webhook():
         if comment == "BUY_ENTRY":
             with trades_lock:
                 existing = trades.get(symbol)
-            # If there's an active trade (any side), force close and re-open with BUY
             if existing and not existing.get("closed", True):
                 async_exit_and_open(symbol, "BUY", close_price)
             else:
-                # pass interval and last bar high/low into trade state for trailing calculations
                 with trades_lock:
                     trades.setdefault(symbol, {})["interval"] = interval.lower()
                     trades.setdefault(symbol, {})["last_bar_high"] = float(bar_high) if bar_high else close_price
@@ -568,48 +566,20 @@ def webhook():
                     trades.setdefault(symbol, {})["last_bar_low"] = float(bar_low) if bar_low else close_price
                 open_position(symbol, "SELL", close_price)
 
-        # EXIT signals: as before (we still allow secondary mode)
+        # EXIT signals
         elif comment in ("EXIT_LONG", "CROSS_EXIT_LONG"):
             with trades_lock:
-                if symbol in trades and not trades[symbol].get("closed", True) and DUAL_TRAILING_ENABLED:
-                    trails = trades[symbol].setdefault("trails", {})
-                    sec = trails.setdefault("secondary", {})
-                    if not sec.get("active"):
-                        sec["active"] = True
-                        cp = get_current_price(symbol) or close_price
-                        sec["peak"] = cp
-                        sec["trough"] = cp
-                        sec["distance_pct"] = TS_HIGH_OFFSET_PCT
-                        try:
-                            log_trailing_start(symbol, "secondary")
-                        except Exception:
-                            send_telegram_message(f"🛰️ Starting 2nd trailing monitor for {symbol} (exit signal detected)")
-                    if not trades[symbol].get("trailing_monitor_started"):
-                        trades[symbol]["trailing_monitor_started"] = True
-                        threading.Thread(target=monitor_trailing_and_exit, args=(symbol, "BUY"), daemon=True).start()
+                if symbol in trades and not trades[symbol].get("closed", True):
+                    close_position(symbol, "BUY", close_price)
                 else:
-                    print(f"⚠️ EXIT received for {symbol} but no active trade to attach secondary trailing, or dual trailing disabled.")
+                    print(f"⚠️ EXIT received for {symbol} but no active trade.")
 
         elif comment in ("EXIT_SHORT", "CROSS_EXIT_SHORT"):
             with trades_lock:
-                if symbol in trades and not trades[symbol].get("closed", True) and DUAL_TRAILING_ENABLED:
-                    trails = trades[symbol].setdefault("trails", {})
-                    sec = trails.setdefault("secondary", {})
-                    if not sec.get("active"):
-                        sec["active"] = True
-                        cp = get_current_price(symbol) or close_price
-                        sec["peak"] = cp
-                        sec["trough"] = cp
-                        sec["distance_pct"] = TS_HIGH_OFFSET_PCT
-                        try:
-                            log_trailing_start(symbol, "secondary")
-                        except Exception:
-                            send_telegram_message(f"🛰️ Starting 2nd trailing monitor for {symbol} (exit signal detected)")
-                    if not trades[symbol].get("trailing_monitor_started"):
-                        trades[symbol]["trailing_monitor_started"] = True
-                        threading.Thread(target=monitor_trailing_and_exit, args=(symbol, "SELL"), daemon=True).start()
+                if symbol in trades and not trades[symbol].get("closed", True):
+                    close_position(symbol, "SELL", close_price)
                 else:
-                    print(f"⚠️ EXIT received for {symbol} but no active trade to attach secondary trailing, or dual trailing disabled.")
+                    print(f"⚠️ EXIT received for {symbol} but no active trade.")
 
         else:
             print(f"⚠️ Unknown comment: {comment}")
@@ -619,6 +589,7 @@ def webhook():
     except Exception as e:
         print("❌ Webhook Error:", e)
         return jsonify({"error": str(e)}), 500
+
 
 # --------- Ping & self-ping ----------
 @app.route("/ping", methods=["GET"])
