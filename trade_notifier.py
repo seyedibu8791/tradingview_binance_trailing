@@ -10,7 +10,7 @@ from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
     TRADE_AMOUNT, LEVERAGE, STOP_LOSS_PCT,
     BASE_URL, BINANCE_API_KEY, BINANCE_SECRET_KEY, DEBUG,
-    TS_LOW_OFFSET_PCT, TS_HIGH_OFFSET_PCT, TSI_PRIMARY_TRIGGER_PCT
+    TRAILING_ACTIVATION_PCT, TS_LOW_OFFSET_PCT, TS_HIGH_OFFSET_PCT
 )
 
 # =======================
@@ -224,13 +224,13 @@ def check_loss_conditions(symbol: str, current_price: float = None):
         return
 
     # === Trailing Stop Activation ===
-    if not t.get("trail_active") and pnl_percent >= TSI_PRIMARY_TRIGGER_PCT:
+    if not t.get("trail_active") and pnl_percent >= TRAILING_ACTIVATION_PCT:
         t["trail_active"] = True
         send_telegram_message(f"🎯 <b>{symbol}</b> Trail activated @ {pnl_percent}%")
 
     # === Dynamic Trailing Logic ===
     if t.get("trail_active"):
-        if pnl_percent <= (TSI_PRIMARY_TRIGGER_PCT - TS_LOW_OFFSET_PCT):
+        if pnl_percent <= (TRAILING_ACTIVATION_PCT - TS_LOW_OFFSET_PCT):
             send_telegram_message(f"🎯 <b>{symbol}</b> Trailing stop hit — closing")
             close_trade_on_binance(symbol, t["side"])
             log_trade_exit(symbol, current_price or t["entry_price"], reason="TRAIL_CLOSE")
