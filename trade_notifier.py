@@ -1,4 +1,3 @@
-## trade_notifier.py 
 import requests
 import threading
 import time
@@ -14,11 +13,10 @@ from config import (
     TS_LOW_OFFSET_PCT, TS_HIGH_OFFSET_PCT, TSI_PRIMARY_TRIGGER_PCT
 )
 
-
 # =======================
 # 📦 STORAGE
 # =======================
-trades = {}              # { symbol: {side, entry_price, entry_time, interval, closed, exit_price, pnl, pnl_percent, forced_exit, recovered} }
+trades = {}              # {symbol: {...trade info...}}
 notified_orders = set()  # prevent duplicate entry notifications
 
 
@@ -67,7 +65,7 @@ def _signed_post(path: str, params: dict):
 
 
 # =======================
-# 🔎 Position helpers
+# 🔎 POSITION HELPERS
 # =======================
 def get_position_info(symbol: str) -> Optional[dict]:
     try:
@@ -104,7 +102,7 @@ def get_unrealized_pnl_pct(symbol: str) -> Optional[float]:
 
 
 # =======================
-# 🔒 Close on Binance
+# 🔒 CLOSE TRADE ON BINANCE
 # =======================
 def close_trade_on_binance(symbol: str, side: str):
     try:
@@ -232,9 +230,7 @@ def check_loss_conditions(symbol: str, current_price: float = None):
 
     # === Dynamic Trailing Logic ===
     if t.get("trail_active"):
-        high_offset = TS_HIGH_OFFSET_PCT
-        low_offset = TS_LOW_OFFSET_PCT
-        if pnl_percent <= (TSI_PRIMARY_TRIGGER_PCT - low_offset):
+        if pnl_percent <= (TSI_PRIMARY_TRIGGER_PCT - TS_LOW_OFFSET_PCT):
             send_telegram_message(f"🎯 <b>{symbol}</b> Trailing stop hit — closing")
             close_trade_on_binance(symbol, t["side"])
             log_trade_exit(symbol, current_price or t["entry_price"], reason="TRAIL_CLOSE")
