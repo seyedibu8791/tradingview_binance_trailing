@@ -1,4 +1,6 @@
-#trade_notifier.py
+# ================================
+# trade_notifier.py (FINAL)
+# ================================
 import requests
 import threading
 import time
@@ -187,6 +189,7 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
         "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
         "MARKET_CLOSE": "✅ Market Close",
         "SAME_DIRECTION_REENTRY": "🔁 Same-Direction Re-entry Close",
+        "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Close",
         "NORMAL": "✅ Normal Close"
     }.get(reason, reason)
 
@@ -196,6 +199,29 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
         f"┇{t['side']} | Entry: {t['entry_price']} → Exit: {filled_price}\n"
         f"┇PnL: <b>{t['pnl']}$</b> | {t['pnl_percent']}%\n"
         f"┇Reason: <i>{reason}</i>"
+    )
+    send_telegram_message(msg)
+
+
+# =======================
+# 🎯 LOG TRAILING START
+# =======================
+def log_trailing_start(symbol: str, pnl_percent: float):
+    """Record and notify when trailing starts."""
+    t = trades.get(symbol)
+    if not t or t.get("closed"):
+        return
+
+    t["trail_active"] = True
+    t["trail_start_time"] = time.time()
+    t["trail_start_pct"] = pnl_percent
+
+    msg = (
+        f"🎯 <b>{symbol}</b> Trailing Started\n"
+        f"┇Activation: {pnl_percent}%\n"
+        f"┇Interval: {t.get('interval', 'N/A')}\n"
+        f"┇Side: {t.get('side', '')}\n"
+        f"┇<i>Dynamic trailing now active</i>"
     )
     send_telegram_message(msg)
 
@@ -226,8 +252,7 @@ def check_loss_conditions(symbol: str, current_price: float = None):
 
     # === Trailing Stop Activation ===
     if not t.get("trail_active") and pnl_percent >= TRAILING_ACTIVATION_PCT:
-        t["trail_active"] = True
-        send_telegram_message(f"🎯 <b>{symbol}</b> Trail activated @ {pnl_percent}%")
+        log_trailing_start(symbol, pnl_percent)
 
     # === Dynamic Trailing Logic ===
     if t.get("trail_active"):
