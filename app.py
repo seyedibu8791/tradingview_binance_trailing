@@ -569,21 +569,24 @@ def webhook():
                 open_position(symbol, "SELL", close_price)
 
         # =============== EXIT SIGNALS ===============
-        elif comment == "EXIT_LONG":
-            with trades_lock:
-                if symbol in trades and not trades[symbol].get("closed", True):
-                    # normal exit only — no new position
-                    close_position(symbol, "BUY", close_price)
-                else:
-                    print(f"⚠️ EXIT_LONG received but no active BUY trade for {symbol}")
+elif comment == "EXIT_LONG":
+    with trades_lock:
+        if symbol in trades and not trades[symbol].get("closed", True):
+            trades[symbol]["exit_signal_active"] = True
+            trades[symbol]["exit_price_signal"] = close_price
+            send_telegram_message(f"📡 EXIT_LONG received for {symbol} — monitoring for best close.")
+        else:
+            print(f"⚠️ EXIT_LONG received but no active BUY trade for {symbol}")
 
-        elif comment == "EXIT_SHORT":
-            with trades_lock:
-                if symbol in trades and not trades[symbol].get("closed", True):
-                    # normal exit only — no new position
-                    close_position(symbol, "SELL", close_price)
-                else:
-                    print(f"⚠️ EXIT_SHORT received but no active SELL trade for {symbol}")
+elif comment == "EXIT_SHORT":
+    with trades_lock:
+        if symbol in trades and not trades[symbol].get("closed", True):
+            trades[symbol]["exit_signal_active"] = True
+            trades[symbol]["exit_price_signal"] = close_price
+            send_telegram_message(f"📡 EXIT_SHORT received for {symbol} — monitoring for best close.")
+        else:
+            print(f"⚠️ EXIT_SHORT received but no active SELL trade for {symbol}")
+
 
         # =============== CROSS EXIT + REVERSE ENTRY ===============
         elif comment == "CROSS_EXIT_LONG":
