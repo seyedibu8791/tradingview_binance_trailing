@@ -135,3 +135,11 @@ def get_unrealized_pnl_pct(symbol: str):
         if DEBUG:
             print("⚠️ get_unrealized_pnl_pct error:", e)
         return None
+
+
+# =============================
+#  COMPATIBILITY ALIASES (for app.py)
+# =============================
+TRAILING_STOP_ACTIVATION = TRAILING_ACTIVATION_PCT
+TRAILING_STOP_LOW_PROFIT = TS_LOW_OFFSET_PCT
+TRAILING_STOP_HIGH_PROFIT = TS_HIGH_OFFSET_PCT
