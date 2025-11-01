@@ -8,11 +8,9 @@ import requests
 #  ENVIRONMENT CONFIGURATION
 # =============================
 
-# --- Binance API Configuration ---
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
 
-# --- Mode (TESTNET or MAINNET) ---
 ENVIRONMENT = os.getenv("ENVIRONMENT", "TESTNET").upper()
 BASE_URL = (
     "https://testnet.binancefuture.com"
@@ -25,9 +23,9 @@ USE_TESTNET = os.getenv("USE_TESTNET", "True").lower() == "true"
 # =============================
 #  TRADING PARAMETERS
 # =============================
-TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 50))         # USD value per trade
+TRADE_AMOUNT = float(os.getenv("TRADE_AMOUNT", 50))
 LEVERAGE = int(os.getenv("LEVERAGE", 20))
-MARGIN_TYPE = os.getenv("MARGIN_TYPE", "ISOLATED").upper()  # CROSS or ISOLATED
+MARGIN_TYPE = os.getenv("MARGIN_TYPE", "ISOLATED").upper()
 MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", 5))
 EXIT_MARKET_DELAY = int(os.getenv("EXIT_MARKET_DELAY", 10))
 OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", 3))
@@ -42,10 +40,17 @@ TRAILING_DISTANCE_PCT = float(os.getenv("TRAILING_DISTANCE_PCT", 0.3))
 TRAILING_UPDATE_INTERVAL = int(os.getenv("TRAILING_UPDATE_INTERVAL", 5))
 
 # =============================
+#  TSI TRAILING CONFIG (NEW)
+# =============================
+TSI_PRIMARY_TRIGGER_PCT = float(os.getenv("TSI_PRIMARY_TRIGGER_PCT", 0.5))       # activation threshold %
+TSI_LOW_PROFIT_OFFSET_PCT = float(os.getenv("TSI_LOW_PROFIT_OFFSET_PCT", 0.1))   # offset at 0.5% profit
+TSI_HIGH_PROFIT_OFFSET_PCT = float(os.getenv("TSI_HIGH_PROFIT_OFFSET_PCT", 0.1)) # offset at 10% profit
+
+# =============================
 #  LOSS CONTROL PARAMETERS
 # =============================
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 3.0))     # percent configured by user
-LOSS_BARS_LIMIT = int(os.getenv("LOSS_BARS_LIMIT", 2))     # consecutive bars negative to force exit
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 3.0))
+LOSS_BARS_LIMIT = int(os.getenv("LOSS_BARS_LIMIT", 2))
 
 # =============================
 #  TELEGRAM CONFIGURATION
@@ -62,8 +67,6 @@ DAILY_SUMMARY_TIME_IST = os.getenv("DAILY_SUMMARY_TIME_IST", "21:30")
 #  FLASK CONFIGURATION
 # =============================
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
-
-# Render/Heroku safe PORT parse
 FLASK_PORT_RAW = os.getenv("FLASK_PORT", "5000").replace("$", "")
 FLASK_PORT = int(FLASK_PORT_RAW) if FLASK_PORT_RAW.isdigit() else 5000
 
@@ -75,32 +78,9 @@ LOG_FILE = os.getenv("LOG_FILE", "trades.log")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # =============================
-#  LOG CONFIGURATION DETAILS
-# =============================
-print("📘 CONFIGURATION LOADED")
-print("------------------------------")
-print(f"Environment:           {ENVIRONMENT}")
-print(f"Leverage:              {LEVERAGE}x ({MARGIN_TYPE})")
-print(f"Trade Amount:          ${TRADE_AMOUNT}")
-print(f"Exit Market Delay:     {EXIT_MARKET_DELAY}s")
-print(f"Trailing Activation:   {TRAILING_ACTIVATION_PCT}%")
-print(f"Trailing Low Offset:   {TS_LOW_OFFSET_PCT}%")
-print(f"Trailing High Offset:  {TS_HIGH_OFFSET_PCT}%")
-print(f"Trailing Distance:     {TRAILING_DISTANCE_PCT}%")
-print(f"Opposite Close Delay:  {OPPOSITE_CLOSE_DELAY}s")
-print(f"Max Active Trades:     {MAX_ACTIVE_TRADES}")
-print(f"Stop Loss %:           {STOP_LOSS_PCT}% (x leverage for threshold)")
-print(f"Loss Bars Limit:       {LOSS_BARS_LIMIT}")
-print(f"Daily Summary Time:    {DAILY_SUMMARY_TIME_IST} IST")
-print(f"Flask Host:            {FLASK_HOST}")
-print(f"Flask Port:            {FLASK_PORT}")
-print("------------------------------")
-
-# =============================
-#  FUNCTION: GET UNREALIZED PNL (signed request)
+#  FUNCTION: GET UNREALIZED PNL
 # =============================
 def _signed_get(path: str, params: dict = None, timeout: int = 10):
-    """Helper: signed GET to Binance Futures"""
     if params is None:
         params = {}
     params["timestamp"] = int(time.time() * 1000)
@@ -112,12 +92,7 @@ def _signed_get(path: str, params: dict = None, timeout: int = 10):
     r.raise_for_status()
     return r.json()
 
-
 def get_unrealized_pnl_pct(symbol: str):
-    """
-    Returns unrealized PnL percent (scaled by leverage) for the given symbol.
-    If no position or error, returns None.
-    """
     try:
         data = _signed_get("/fapi/v2/positionRisk")
         for pos in data:
@@ -136,10 +111,16 @@ def get_unrealized_pnl_pct(symbol: str):
             print("⚠️ get_unrealized_pnl_pct error:", e)
         return None
 
-
 # =============================
-#  COMPATIBILITY ALIASES (for app.py)
+#  LOG CONFIGURATION DETAILS
 # =============================
-TRAILING_STOP_ACTIVATION = TRAILING_ACTIVATION_PCT
-TRAILING_STOP_LOW_PROFIT = TS_LOW_OFFSET_PCT
-TRAILING_STOP_HIGH_PROFIT = TS_HIGH_OFFSET_PCT
+print("📘 CONFIGURATION LOADED")
+print("------------------------------")
+print(f"Environment:           {ENVIRONMENT}")
+print(f"Leverage:              {LEVERAGE}x ({MARGIN_TYPE})")
+print(f"Trade Amount:          ${TRADE_AMOUNT}")
+print(f"Trailing Activation:   {TRAILING_ACTIVATION_PCT}%")
+print(f"TSI Activation:        {TSI_PRIMARY_TRIGGER_PCT}%")
+print(f"TSI Low Offset:        {TSI_LOW_PROFIT_OFFSET_PCT}%")
+print(f"TSI High Offset:       {TSI_HIGH_PROFIT_OFFSET_PCT}%")
+print("------------------------------")
