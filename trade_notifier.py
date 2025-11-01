@@ -10,10 +10,17 @@ import hashlib
 from typing import Optional
 
 from config import (
-    TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-    TRADE_AMOUNT, LEVERAGE, STOP_LOSS_PCT,
-    BASE_URL, BINANCE_API_KEY, BINANCE_SECRET_KEY, DEBUG,
-    TRAILING_ACTIVATION_PCT, TS_LOW_OFFSET_PCT, TS_HIGH_OFFSET_PCT
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+    DEBUG,
+    get_unrealized_pnl_pct,
+    TRAILING_ACTIVATION_PCT,        # ✅ add this
+    TRAILING_DISTANCE_PCT,          # ✅ add this (used in trailing logic)
+    TS_LOW_OFFSET_PCT,              # ✅ optional, if used
+    TS_HIGH_OFFSET_PCT,             # ✅ optional, if used
+    TSI_PRIMARY_TRIGGER_PCT,        # ✅ optional, if used
+    TSI_LOW_PROFIT_OFFSET_PCT,      # ✅ optional
+    TSI_HIGH_PROFIT_OFFSET_PCT      # ✅ optional
 )
 
 # =======================
