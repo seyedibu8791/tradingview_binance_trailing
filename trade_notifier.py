@@ -1,5 +1,5 @@
 # ================================
-# trade_notifier.py (FINAL)
+# trade_notifier.py (FINAL FIXED)
 # ================================
 import requests
 import threading
@@ -9,18 +9,25 @@ import hmac
 import hashlib
 from typing import Optional
 
+# ===============================
+# ✅ IMPORTS FROM CONFIG
+# ===============================
 from config import (
+    BINANCE_API_KEY,
+    BINANCE_SECRET_KEY,
+    BASE_URL,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
     DEBUG,
-    get_unrealized_pnl_pct,
-    TRAILING_ACTIVATION_PCT,        # ✅ add this
-    TRAILING_DISTANCE_PCT,          # ✅ add this (used in trailing logic)
-    TS_LOW_OFFSET_PCT,              # ✅ optional, if used
-    TS_HIGH_OFFSET_PCT,             # ✅ optional, if used
-    TSI_PRIMARY_TRIGGER_PCT,        # ✅ optional, if used
-    TSI_LOW_PROFIT_OFFSET_PCT,      # ✅ optional
-    TSI_HIGH_PROFIT_OFFSET_PCT      # ✅ optional
+    LEVERAGE,
+    TRADE_AMOUNT,
+    TRAILING_ACTIVATION_PCT,
+    TRAILING_DISTANCE_PCT,
+    TS_LOW_OFFSET_PCT,
+    TS_HIGH_OFFSET_PCT,
+    TSI_PRIMARY_TRIGGER_PCT,
+    TSI_LOW_PROFIT_OFFSET_PCT,
+    TSI_HIGH_PROFIT_OFFSET_PCT
 )
 
 # =======================
@@ -71,6 +78,8 @@ def _signed_post(path: str, params: dict):
     url = f"{BASE_URL}{path}?{query}&signature={signature}"
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     resp = requests.post(url, headers=headers, timeout=10)
+    if DEBUG:
+        print("🧾 POST:", path, resp.text)
     return resp.json()
 
 
@@ -211,10 +220,9 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
 
 
 # =======================
-# 🎯 LOG TRAILING START
+# 🎯 TRAILING START
 # =======================
 def log_trailing_start(symbol: str, pnl_percent: float):
-    """Record and notify when trailing starts."""
     t = trades.get(symbol)
     if not t or t.get("closed"):
         return
