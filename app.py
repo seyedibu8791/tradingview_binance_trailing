@@ -2,15 +2,15 @@ from flask import Flask, request, jsonify
 import requests, hmac, hashlib, time, threading, os
 from threading import Lock
 
-# --- Local imports ---
 from config import (
     BINANCE_API_KEY, BINANCE_SECRET_KEY, BASE_URL,
     TRADE_AMOUNT, LEVERAGE, MARGIN_TYPE, MAX_ACTIVE_TRADES,
     EXIT_MARKET_DELAY, OPPOSITE_CLOSE_DELAY,
-    TRAILING_STOP_ACTIVATION,
-    TRAILING_STOP_LOW_PROFIT,
-    TRAILING_STOP_HIGH_PROFIT
+    TSI_PRIMARY_TRIGGER_PCT,
+    TSI_LOW_PROFIT_OFFSET_PCT,
+    TSI_HIGH_PROFIT_OFFSET_PCT
 )
+
 
 # ✅ import from trade_notifier, not config
 from trade_notifier import (
