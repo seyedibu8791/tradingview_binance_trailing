@@ -34,7 +34,7 @@ OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", 3))
 # =============================
 #  TRAILING STOP PARAMETERS
 # =============================
-TRAILING_ACTIVATION_PCT = float(os.getenv("TRAILING_ACTIVATION_PCT", 0.5))
+TRAILING_ACTIVATION_PCT = float(os.getenv("TRAILING_ACTIVATION_PCT", 0.2))
 TS_LOW_OFFSET_PCT = float(os.getenv("TS_LOW_OFFSET_PCT", 0.1))
 TS_HIGH_OFFSET_PCT = float(os.getenv("TS_HIGH_OFFSET_PCT", 0.1))
 TRAILING_DISTANCE_PCT = float(os.getenv("TRAILING_DISTANCE_PCT", 0.3))
@@ -43,14 +43,14 @@ TRAILING_UPDATE_INTERVAL = int(os.getenv("TRAILING_UPDATE_INTERVAL", 5))
 # =============================
 #  TSI TRAILING CONFIG (NEW)
 # =============================
-TSI_PRIMARY_TRIGGER_PCT = float(os.getenv("TSI_PRIMARY_TRIGGER_PCT", 0.5))       # activation threshold %
+TSI_PRIMARY_TRIGGER_PCT = float(os.getenv("TSI_PRIMARY_TRIGGER_PCT", 0.2))       # activation threshold %
 TSI_LOW_PROFIT_OFFSET_PCT = float(os.getenv("TSI_LOW_PROFIT_OFFSET_PCT", 0.1))   # offset at 0.5% profit
 TSI_HIGH_PROFIT_OFFSET_PCT = float(os.getenv("TSI_HIGH_PROFIT_OFFSET_PCT", 0.1)) # offset at 10% profit
 
 # =============================
 #  LOSS CONTROL PARAMETERS
 # =============================
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 3.0))
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", 2.0))
 LOSS_BARS_LIMIT = int(os.getenv("LOSS_BARS_LIMIT", 2))
 
 # =============================
