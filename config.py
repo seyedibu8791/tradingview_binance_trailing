@@ -41,10 +41,6 @@ TS_HIGH_OFFSET_PCT = float(os.getenv("TS_HIGH_OFFSET_PCT", 0.1))
 TRAILING_DISTANCE_PCT = float(os.getenv("TRAILING_DISTANCE_PCT", 0.3))
 TRAILING_UPDATE_INTERVAL = int(os.getenv("TRAILING_UPDATE_INTERVAL", 5))
 
-# Dual trailing and auto-tighter system
-DUAL_TRAILING_ENABLED = os.getenv("DUAL_TRAILING_ENABLED", "True").lower() == "true"
-TRAILING_COMPARE_PNL = os.getenv("TRAILING_COMPARE_PNL", "True").lower() == "true"
-
 # =============================
 #  LOSS CONTROL PARAMETERS
 # =============================
@@ -91,8 +87,6 @@ print(f"Trailing Activation:   {TRAILING_ACTIVATION_PCT}%")
 print(f"Trailing Low Offset:   {TS_LOW_OFFSET_PCT}%")
 print(f"Trailing High Offset:  {TS_HIGH_OFFSET_PCT}%")
 print(f"Trailing Distance:     {TRAILING_DISTANCE_PCT}%")
-print(f"Dual Trailing:         {DUAL_TRAILING_ENABLED}")
-print(f"Compare PnL Trail:     {TRAILING_COMPARE_PNL}")
 print(f"Opposite Close Delay:  {OPPOSITE_CLOSE_DELAY}s")
 print(f"Max Active Trades:     {MAX_ACTIVE_TRADES}")
 print(f"Stop Loss %:           {STOP_LOSS_PCT}% (x leverage for threshold)")
@@ -117,6 +111,7 @@ def _signed_get(path: str, params: dict = None, timeout: int = 10):
     r = requests.get(url, headers=headers, timeout=timeout)
     r.raise_for_status()
     return r.json()
+
 
 def get_unrealized_pnl_pct(symbol: str):
     """
