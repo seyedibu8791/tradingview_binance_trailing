@@ -11,7 +11,8 @@ from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
     TRADE_AMOUNT, LEVERAGE, STOP_LOSS_PCT,
     BASE_URL, BINANCE_API_KEY, BINANCE_SECRET_KEY, DEBUG,
-    TRAILING_COMPARE_PNL, TS_LOW_OFFSET_PCT, TS_HIGH_OFFSET_PCT
+    TRAILING_COMPARE_PNL, TS_LOW_OFFSET_PCT, TS_HIGH_OFFSET_PCT,
+    TSI_PRIMARY_TRIGGER_PCT, TSI_SECONDARY_TRIGGER_PCT
 )
 
 # =======================
@@ -146,7 +147,8 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, 
         "forced_exit": False,
         "recovered": False,
         "entry_time": time.time(),
-        "interval": interval.lower()
+        "interval": interval.lower(),
+        "trail_active": False
     }
 
     direction_emoji = "🟩⬆️" if side.upper() == "BUY" else "🟥⬇️"
@@ -156,7 +158,7 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, 
         f"┇Entry: {filled_price}\n"
         f"┇Interval: {interval}\n"
         f"┇Leverage: {LEVERAGE}x | Amount: ${TRADE_AMOUNT}\n"
-        f"┇<i>Trailing & Risk Monitor Initiated</i>"
+        f"┇<i>Dynamic Trailing & Risk Monitor Active</i>"
     )
     send_telegram_message(msg)
 
@@ -179,13 +181,7 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
     t["pnl"] = round(pnl_value, 2)
     t["pnl_percent"] = round(pnl_percent or 0.0, 2)
 
-    if t["pnl_percent"] > 0:
-        emoji = "💰✅"
-    elif t["pnl_percent"] < 0:
-        emoji = "💔⛔️"
-    else:
-        emoji = "⚪️"
-
+    emoji = "💰✅" if t["pnl_percent"] > 0 else "💔⛔️" if t["pnl_percent"] < 0 else "⚪️"
     reason_text = {
         "STOP_LOSS": "🚨 Stoploss Triggered",
         "FORCE_CLOSE": "⚠️ 2-Bar Loss Exit",
@@ -202,15 +198,11 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
         f"┇PnL: <b>{t['pnl']}$</b> | {t['pnl_percent']}%\n"
         f"┇Reason: <i>{reason}</i>"
     )
-
-    if reason in ["FORCE_CLOSE", "STOP_LOSS"]:
-        msg += f"\n┇<b>Force PnL</b>: {t['pnl_percent']}% ({t['pnl']}$)"
-
     send_telegram_message(msg)
 
 
 # =======================
-# 📉 LOSS MONITOR
+# 📉 LOSS & TRAIL MONITOR
 # =======================
 def check_loss_conditions(symbol: str, current_price: float = None):
     if symbol not in trades or trades[symbol].get("closed"):
@@ -221,62 +213,37 @@ def check_loss_conditions(symbol: str, current_price: float = None):
     if pnl_percent is None:
         return
 
-    # bar durations
-    bar_durations = {
-        "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
-        "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600,
-        "12h": 43200, "1d": 86400
-    }
+    # === 2-Bar Exit Check ===
+    bar_durations = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
     bar_duration = bar_durations.get(t["interval"], 3600)
     elapsed = time.time() - t["entry_time"]
 
-    # 3rd bar check (2 completed bars)
     if elapsed >= 2 * bar_duration and pnl_percent < 0 and not t.get("forced_exit"):
         t["forced_exit"] = True
-        send_telegram_message(
-            f"⚠️ <b>{symbol}</b> PnL negative after 2 bars → Force Close triggered at 3rd bar"
-        )
+        send_telegram_message(f"⚠️ <b>{symbol}</b> 2-bar negative → Force closing trade")
         close_trade_on_binance(symbol, t["side"])
         log_trade_exit(symbol, current_price or t["entry_price"], reason="FORCE_CLOSE")
-        return "FORCE_CLOSE"
+        return
 
-    # Immediate Stop Loss condition
-    immediate_threshold = -(STOP_LOSS_PCT * LEVERAGE)
-    if pnl_percent <= immediate_threshold and not t.get("forced_exit"):
-        t["forced_exit"] = True
-        send_telegram_message(
-            f"🚨 <b>{symbol}</b> PnL {pnl_percent}% ≤ −{STOP_LOSS_PCT}×{LEVERAGE} → Immediate Exit"
-        )
-        close_trade_on_binance(symbol, t["side"])
-        log_trade_exit(symbol, current_price or t["entry_price"], reason="STOP_LOSS")
-        return "STOP_LOSS"
+    # === Trailing Stop Activation ===
+    if not t.get("trail_active") and pnl_percent >= TSI_PRIMARY_TRIGGER_PCT:
+        t["trail_active"] = True
+        send_telegram_message(f"🎯 <b>{symbol}</b> Trail activated @ {pnl_percent}%")
 
-    return None
-
-
-# =======================
-# 🕐 TRAILING & COMPARISON
-# =======================
-def log_trailing_start(symbol: str, trailing_type: str = "Primary", extra: str = ""):
-    txt = f"🕐 <b>#{symbol}</b>: {trailing_type} Trailing Activated"
-    if extra:
-        txt += f" ┇{extra}"
-    send_telegram_message(txt)
-
-
-def notify_trail_comparison(symbol: str, primary_pct: float, secondary_pct: Optional[float]):
-    sec_text = f" | Secondary: {round(secondary_pct,2)}%" if secondary_pct is not None else ""
-    send_telegram_message(f"⚖️ <b>#{symbol}</b> Trail PnL — Primary: {round(primary_pct,2)}%{sec_text}")
-
-    if TRAILING_COMPARE_PNL and secondary_pct is not None:
-        if primary_pct - secondary_pct >= 0.3:
-            send_telegram_message(
-                f"🎯 <b>#{symbol}</b> Primary protects more — prefer Primary stop (diff {round(primary_pct-secondary_pct,2)}%)"
-            )
+    # === Dynamic Trailing Logic ===
+    if t.get("trail_active"):
+        high_offset = TS_HIGH_OFFSET_PCT
+        low_offset = TS_LOW_OFFSET_PCT
+        if pnl_percent <= (TSI_PRIMARY_TRIGGER_PCT - low_offset):
+            send_telegram_message(f"🎯 <b>{symbol}</b> Trailing stop hit — closing")
+            close_trade_on_binance(symbol, t["side"])
+            log_trade_exit(symbol, current_price or t["entry_price"], reason="TRAIL_CLOSE")
+            t["trail_active"] = False
+            return
 
 
 # =======================
-# 📊 DAILY SUMMARY THREAD
+# 📊 DAILY SUMMARY
 # =======================
 def send_daily_summary():
     while True:
@@ -306,11 +273,9 @@ def send_daily_summary():
             f"✅ Net PnL %: {net_pnl}%"
         )
         send_telegram_message(msg)
-
         for s in list(trades.keys()):
             if trades[s].get("closed"):
                 trades.pop(s, None)
 
 
-# start background summary thread
 threading.Thread(target=send_daily_summary, daemon=True).start()
