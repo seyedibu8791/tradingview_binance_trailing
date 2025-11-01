@@ -12,15 +12,14 @@ from config import (
 )
 
 
-# ✅ import from trade_notifier, not config
 from trade_notifier import (
     log_trade_entry,
     log_trade_exit,
     check_loss_conditions,
     send_telegram_message,
-    get_unrealized_pnl_pct,
-    log_trailing_start   # ensure this exists in trade_notifier.py
+    get_unrealized_pnl_pct
 )
+
 
 # =========================
 # Flask Initialization
