@@ -568,24 +568,43 @@ def webhook():
                     trades.setdefault(symbol, {})["last_bar_low"] = float(bar_low) if bar_low else close_price
                 open_position(symbol, "SELL", close_price)
 
-        # =============== EXIT SIGNALS ===============
-elif comment == "EXIT_LONG":
-    with trades_lock:
-        if symbol in trades and not trades[symbol].get("closed", True):
-            trades[symbol]["exit_signal_active"] = True
-            trades[symbol]["exit_price_signal"] = close_price
-            send_telegram_message(f"📡 EXIT_LONG received for {symbol} — monitoring for best close.")
-        else:
-            print(f"⚠️ EXIT_LONG received but no active BUY trade for {symbol}")
+        # =============== EXIT SIGNALS (monitor only) ===============
+        elif comment == "EXIT_LONG":
+            with trades_lock:
+                if symbol in trades and not trades[symbol].get("closed", True):
+                    trades[symbol]["exit_signal_active"] = True
+                    trades[symbol]["exit_price_signal"] = close_price
+                    send_telegram_message(f"📡 EXIT_LONG received for {symbol} — monitoring for best close.")
+                else:
+                    print(f"⚠️ EXIT_LONG received but no active BUY trade for {symbol}")
 
-elif comment == "EXIT_SHORT":
-    with trades_lock:
-        if symbol in trades and not trades[symbol].get("closed", True):
-            trades[symbol]["exit_signal_active"] = True
-            trades[symbol]["exit_price_signal"] = close_price
-            send_telegram_message(f"📡 EXIT_SHORT received for {symbol} — monitoring for best close.")
+        elif comment == "EXIT_SHORT":
+            with trades_lock:
+                if symbol in trades and not trades[symbol].get("closed", True):
+                    trades[symbol]["exit_signal_active"] = True
+                    trades[symbol]["exit_price_signal"] = close_price
+                    send_telegram_message(f"📡 EXIT_SHORT received for {symbol} — monitoring for best close.")
+                else:
+                    print(f"⚠️ EXIT_SHORT received but no active SELL trade for {symbol}")
+
+        # =============== CROSS EXIT + REVERSE ENTRY ===============
+        elif comment == "CROSS_EXIT_LONG":
+            print(f"🔁 CROSS_EXIT_LONG → Close BUY, Open SELL for {symbol}")
+            async_exit_and_open(symbol, "SELL", close_price)
+
+        elif comment == "CROSS_EXIT_SHORT":
+            print(f"🔁 CROSS_EXIT_SHORT → Close SELL, Open BUY for {symbol}")
+            async_exit_and_open(symbol, "BUY", close_price)
+
         else:
-            print(f"⚠️ EXIT_SHORT received but no active SELL trade for {symbol}")
+            print(f"⚠️ Unknown comment: {comment}")
+            return jsonify({"error": f"Unknown comment: {comment}"}), 400
+
+        return jsonify({"status": "ok"})
+
+    except Exception as e:
+        print("❌ Webhook Error:", e)
+        return jsonify({"error": str(e)}), 500
 
 
         # =============== CROSS EXIT + REVERSE ENTRY ===============
