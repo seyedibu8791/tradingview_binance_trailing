@@ -376,7 +376,7 @@ def compute_locked_pnl(entry_price, current_price, side, quantity):
 
 # ==============================
 
-# --------- Dynamic trailing monitor (replaces unified trailing) ----------
+# --------- Dynamic trailing monitor ----------
 def monitor_trailing_and_exit(symbol, side):
     """
     Monitor that calculates dynamic trailing stop and executes market exit when hit.
@@ -387,7 +387,6 @@ def monitor_trailing_and_exit(symbol, side):
     max_run = max(60, int(os.getenv("MAX_TRAILING_RUNTIME_MIN", "120"))) * 60  # safety cap
 
     while True:
-        # safety: stop if exceeded runtime
         if time.time() - start_time > max_run:
             print(f"⚠️ Trailing monitor max runtime reached for {symbol}. Stopping monitor.")
             with trades_lock:
@@ -406,30 +405,29 @@ def monitor_trailing_and_exit(symbol, side):
             dyn = trade.setdefault("dynamic_trail", {})
             interval = trade.get("interval", "1h")
 
-        current = get_current_price(symbol)
-        if current <= 0:
+        current_price = get_current_price(symbol)
+        if current_price <= 0:
             time.sleep(1)
             continue
 
-        # try to get accurate pnl from notifier helper
+        # Try to get accurate pnl from notifier helper
         try:
             pnl_percent = get_unrealized_pnl_pct(symbol) or 0.0
         except Exception:
             if side.upper() == "BUY":
-                pnl_percent = ((current - entry_price) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
+                pnl_percent = ((current_price - entry_price) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
             else:
-                pnl_percent = ((entry_price - current) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
+                pnl_percent = ((entry_price - current_price) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
 
-        # Immediate STOPLOSS (uses STOP_LOSS_PCT from config)
+        # Immediate stoploss
         try:
             immediate_threshold = -STOP_LOSS_PCT * LEVERAGE
             if pnl_percent <= immediate_threshold and not trade.get("forced_exit", False):
                 with trades_lock:
                     trades[symbol]["forced_exit"] = True
-                msg = (f"🚨 Immediate Stoploss Triggered for {symbol} | PnL%: {round(pnl_percent,2)} "
-                       f"<= -{STOP_LOSS_PCT} x {LEVERAGE} => closing market position.")
+                msg = f"🚨 Immediate Stoploss Triggered for {symbol} | PnL%: {round(pnl_percent,2)}"
                 try:
-                    log_trade_exit(symbol, current, reason="STOP_LOSS")
+                    log_trade_exit(symbol, current_price, reason="STOP_LOSS")
                 except Exception:
                     send_telegram_message(msg)
                 execute_market_exit(symbol, side)
@@ -437,25 +435,25 @@ def monitor_trailing_and_exit(symbol, side):
         except Exception as e:
             print("❌ Immediate stoploss check error:", e)
 
-        # 2-bar check via notifier helper (may close)
+        # Optional external loss checks
         try:
-            check_loss_conditions(symbol, current_price=current)
+            check_loss_conditions(symbol, current_price=current_price)
         except Exception as e:
             print("⚠️ check_loss_conditions error:", e)
 
         # Update peak/trough
         if side.upper() == "BUY":
-            if current > dyn.get("peak", entry_price):
-                dyn["peak"] = current
+            if current_price > dyn.get("peak", entry_price):
+                dyn["peak"] = current_price
         else:
-            if current < dyn.get("trough", entry_price):
-                dyn["trough"] = current
+            if current_price < dyn.get("trough", entry_price):
+                dyn["trough"] = current_price
 
-        # Activation condition for trailing
+        # Trailing activation
         activated = abs(pnl_percent) >= dyn.get("activation_pct", TRAILING_ACTIVATION_PCT)
 
         if activated:
-            # Ensure we log trailing start exactly once with the real pnl%
+            # Log trailing start once
             if not dyn.get("notified", False):
                 try:
                     log_trailing_start(symbol, round(pnl_percent, 2))
@@ -463,40 +461,34 @@ def monitor_trailing_and_exit(symbol, side):
                     send_telegram_message(f"🎯 <b>{symbol}</b> Trailing Started @ {round(pnl_percent,2)}%")
                 dyn["notified"] = True
 
-            # compute distance via compute_ts_dynamic
-            profit_for_ts = abs(((dyn.get("peak", entry_price) - entry_price) / entry_price * 100) if side.upper() == "BUY"
-                                else ((entry_price - dyn.get("trough", entry_price)) / entry_price * 100))
-            distance_pct = compute_ts_dynamic(abs(profit_for_ts))
+            # Compute dynamic trailing stop (fixed)
+            distance_pct = compute_ts_dynamic(entry_price, side, current_price)
 
-            # Use last bar highs/lows if provided
-            bar_high = trade.get("last_bar_high", current)
-            bar_low = trade.get("last_bar_low", current)
+            if distance_pct is None:
+                time.sleep(1)
+                continue
 
-            offsets = calculate_trailing_offsets(symbol, entry_price, TRAILING_ACTIVATION_PCT, distance_pct, bar_high, bar_low)
+            high_offset, low_offset = calculate_trailing_offsets(entry_price, side, TRAILING_DISTANCE_PCT)
+
             if side.upper() == "BUY":
-                stop_by_distance = dyn.get("peak", entry_price) - offsets["offset_long_price"]
-                stop_by_pct = dyn.get("peak", entry_price) * (1 - distance_pct / 100.0)
-                stop_price = max(stop_by_distance, stop_by_pct)
+                stop_price = max(entry_price, current_price * (1 - TRAILING_DISTANCE_PCT))
             else:
-                stop_by_distance = dyn.get("trough", entry_price) + offsets["offset_short_price"]
-                stop_by_pct = dyn.get("trough", entry_price) * (1 + distance_pct / 100.0)
-                stop_price = min(stop_by_distance, stop_by_pct)
+                stop_price = min(entry_price, current_price * (1 + TRAILING_DISTANCE_PCT))
 
             dyn["stop_price"] = round(stop_price, 8)
-            usd_locked, pct_locked = compute_locked_pnl(entry_price, dyn["stop_price"], side)
-            dyn["locked_pnl_usd"], dyn["locked_pnl_pct"] = usd_locked, pct_locked
+            dyn["locked_pnl_usd"] = compute_locked_pnl(entry_price, dyn["stop_price"], side, trade.get("quantity", 0))
 
-            # if stop hit
-            if side.upper() == "BUY" and current <= dyn["stop_price"]:
-                send_telegram_message(f"🎯 <b>{symbol}</b> Dynamic trailing stop hit (BUY). Stop: {dyn['stop_price']} Current: {current}")
-                execute_market_exit(symbol, side)
-                return
-            if side.upper() == "SELL" and current >= dyn["stop_price"]:
-                send_telegram_message(f"🎯 <b>{symbol}</b> Dynamic trailing stop hit (SELL). Stop: {dyn['stop_price']} Current: {current}")
+            # If stop hit
+            if side.upper() == "BUY" and current_price <= dyn["stop_price"]:
+                send_telegram_message(f"🎯 <b>{symbol}</b> Dynamic trailing stop hit (BUY). Stop: {dyn['stop_price']} Current: {current_price}")
                 execute_market_exit(symbol, side)
                 return
 
-        # Sleep per trailing update interval
+            if side.upper() == "SELL" and current_price >= dyn["stop_price"]:
+                send_telegram_message(f"🎯 <b>{symbol}</b> Dynamic trailing stop hit (SELL). Stop: {dyn['stop_price']} Current: {current_price}")
+                execute_market_exit(symbol, side)
+                return
+
         time.sleep(max(1, TRAILING_UPDATE_INTERVAL))
 
 # --------- Async exit + re-entry (force close then open) ----------
