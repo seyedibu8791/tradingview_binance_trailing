@@ -607,28 +607,6 @@ def webhook():
         return jsonify({"error": str(e)}), 500
 
 
-        # =============== CROSS EXIT + REVERSE ENTRY ===============
-        elif comment == "CROSS_EXIT_LONG":
-            # Close BUY, open SELL
-            print(f"🔁 CROSS_EXIT_LONG → Close BUY, Open SELL for {symbol}")
-            async_exit_and_open(symbol, "SELL", close_price)
-
-        elif comment == "CROSS_EXIT_SHORT":
-            # Close SELL, open BUY
-            print(f"🔁 CROSS_EXIT_SHORT → Close SELL, Open BUY for {symbol}")
-            async_exit_and_open(symbol, "BUY", close_price)
-
-        else:
-            print(f"⚠️ Unknown comment: {comment}")
-            return jsonify({"error": f"Unknown comment: {comment}"}), 400
-
-        return jsonify({"status": "ok"})
-
-    except Exception as e:
-        print("❌ Webhook Error:", e)
-        return jsonify({"error": str(e)}), 500
-
-
 # --------- Ping & self-ping ----------
 @app.route("/ping", methods=["GET"])
 def ping():
