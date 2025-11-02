@@ -1,4 +1,4 @@
-# app.py (UPDATED - integrated with trade_notifier)
+# app.py ((UPDATED - integrated with trade_notifier))
 from flask import Flask, request, jsonify
 import requests, hmac, hashlib, time, threading, os
 from threading import Lock
