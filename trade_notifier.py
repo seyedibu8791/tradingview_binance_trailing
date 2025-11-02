@@ -206,6 +206,15 @@ def log_trade_entry(symbol, side, order_id, filled_price, interval):
         f"┇<i>Dynamic Trailing Active</i>"
     )
 
+
+# =======================
+# 🎯 TRAILING START LOG
+# =======================
+def log_trailing_start(symbol: str):
+    """Simple notifier when trailing starts."""
+    send_telegram_message(f"🎯 Trailing started for <b>{symbol}</b>")
+
+
 # =======================
 # 🟥 EXIT LOGIC
 # =======================
@@ -231,6 +240,7 @@ def log_trade_exit(symbol, exit_price, reason="EXIT"):
         f"┇Duration: {round((time.time() - t.get('entry_time', time.time())) / 60, 1)} min"
     )
 
+# (remaining functions unchanged: compute_ts_dynamic, check_loss_conditions, send_daily_summary)
 
 # =======================
 # 🎯 compute_ts_dynamic
