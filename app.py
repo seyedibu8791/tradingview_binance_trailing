@@ -338,42 +338,73 @@ def get_symbol_tick_size(symbol):
     return 0.0001
 
 
-def compute_ts_dynamic(entry_price, side, current_price, activation_pct=0.002, trail_pct=0.001):
+def compute_ts_dynamic(entry_price, side, current_price,
+                       activation_pct=TRAILING_ACTIVATION_PCT,
+                       trail_pct=TRAILING_DISTANCE_PCT):
     """
-    Compute dynamic trailing stop based on activation and trailing %.
-    Returns the new stop loss price.
+    Compute dynamic trailing stop price (adaptive to current price).
+    - activation_pct: threshold % at which trailing activates.
+    - trail_pct: % distance used once trailing is active.
+    Returns a stop price if active, else None.
     """
-    if side == "BUY":
-        activation_price = entry_price * (1 + activation_pct)
-        if current_price >= activation_price:
-            return max(entry_price, current_price * (1 - trail_pct))
-    elif side == "SELL":
-        activation_price = entry_price * (1 - activation_pct)
-        if current_price <= activation_price:
-            return min(entry_price, current_price * (1 + trail_pct))
-    return None
+    try:
+        if side.upper() == "BUY":
+            activation_price = entry_price * (1 + activation_pct / 100.0)
+            if current_price >= activation_price:
+                stop_price = current_price * (1 - trail_pct / 100.0)
+                return round(stop_price, 8)
+        elif side.upper() == "SELL":
+            activation_price = entry_price * (1 - activation_pct / 100.0)
+            if current_price <= activation_price:
+                stop_price = current_price * (1 + trail_pct / 100.0)
+                return round(stop_price, 8)
+        return None
+    except Exception as e:
+        print(f"⚠️ compute_ts_dynamic error: {e}")
+        return None
 
 
-def calculate_trailing_offsets(entry_price, side, distance_pct=0.003):
+def calculate_trailing_offsets(entry_price, side,
+                               distance_pct=TRAILING_DISTANCE_PCT,
+                               low_offset_pct=TS_LOW_OFFSET_PCT,
+                               high_offset_pct=TS_HIGH_OFFSET_PCT):
     """
-    Calculate high/low offsets for trailing trigger distance.
+    Compute high/low offsets for trailing stop calculations.
+    Returns a dictionary for easier usage downstream.
     """
-    if side == "BUY":
-        return entry_price * (1 + distance_pct), entry_price * (1 - distance_pct)
-    else:
-        return entry_price * (1 - distance_pct), entry_price * (1 + distance_pct)
+    try:
+        if side.upper() == "BUY":
+            offset_high = entry_price * (1 + (distance_pct + high_offset_pct) / 100.0)
+            offset_low = entry_price * (1 - (distance_pct + low_offset_pct) / 100.0)
+        else:
+            offset_high = entry_price * (1 + (distance_pct + low_offset_pct) / 100.0)
+            offset_low = entry_price * (1 - (distance_pct + high_offset_pct) / 100.0)
+        return {
+            "offset_high": round(offset_high, 8),
+            "offset_low": round(offset_low, 8)
+        }
+    except Exception as e:
+        print(f"⚠️ calculate_trailing_offsets error: {e}")
+        return {"offset_high": entry_price, "offset_low": entry_price}
 
 
-def compute_locked_pnl(entry_price, current_price, side, quantity):
+def compute_locked_pnl(entry_price, current_price, side, quantity=1.0):
     """
-    Compute unrealized PnL in USDT for monitoring or message reporting.
+    Compute locked (unrealized) PnL in USDT and % for message display.
     """
-    if side == "BUY":
-        pnl = (current_price - entry_price) * quantity
-    else:
-        pnl = (entry_price - current_price) * quantity
-    return round(pnl, 3)
-
+    try:
+        if entry_price <= 0 or quantity <= 0:
+            return 0.0, 0.0
+        if side.upper() == "BUY":
+            pnl_usd = (current_price - entry_price) * quantity
+        else:
+            pnl_usd = (entry_price - current_price) * quantity
+        pnl_pct = (pnl_usd / (entry_price * quantity)) * 100
+        return round(pnl_usd, 3), round(pnl_pct, 2)
+    except Exception as e:
+        print(f"⚠️ compute_locked_pnl error: {e}")
+        return 0.0, 0.0
+        
 # ==============================
 
 # --------- Dynamic trailing monitor ----------
