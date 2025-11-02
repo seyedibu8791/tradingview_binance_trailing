@@ -48,6 +48,43 @@ trades = notifier_trades
 # Thread lock for safe multi-threaded updates
 trades_lock = Lock()
 
+# =======================
+# Tick-size cache & hysteresis config
+# =======================
+_symbol_tick_cache = {}
+# Multiplier (number of ticks) used as hysteresis before accepting an updated stop.
+# Follow TradingView style: keep it minimal; make configurable via env if you want.
+TRAILING_HYSTERESIS_TICKS = int(os.getenv("TRAILING_HYSTERESIS_TICKS", "1"))
+
+def get_symbol_tick_size(symbol):
+    """Fetch and cache the tick size for symbol precision."""
+    symbol = symbol.upper()
+    if symbol in _symbol_tick_cache:
+        return _symbol_tick_cache[symbol]
+    try:
+        url = f"{BASE_URL}/fapi/v1/exchangeInfo"
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        for s in data["symbols"]:
+            if s["symbol"] == symbol:
+                for f in s["filters"]:
+                    if f["filterType"] == "PRICE_FILTER":
+                        tick = float(f["tickSize"])
+                        _symbol_tick_cache[symbol] = tick
+                        return tick
+    except Exception as e:
+        print(f"⚠️ Tick size fetch error for {symbol}: {e}")
+    # fallback default tick
+    return 0.0001
+
+def round_to_tick(value, symbol):
+    """Round value to nearest valid tick step for the symbol."""
+    tick = get_symbol_tick_size(symbol)
+    if tick <= 0:
+        return round(value, 8)
+    return round(round(value / tick) * tick, 8)
+
 # --------- Binance signed request helper ----------
 def binance_signed_request(http_method, path, params=None):
     if params is None:
@@ -170,7 +207,8 @@ def open_position(symbol, side, limit_price):
                 "interval": "1h",  # will be overwritten if webhook provides
                 # available to accept bar_high/bar_low from webhook
                 "last_bar_high": limit_price,
-                "last_bar_low": limit_price
+                "last_bar_low": limit_price,
+                "quantity": qty  # store quantity for locked pnl computations
             }
 
     # send a minimal alert (this is allowed/expected) — filled / exit messages will be sent by notifier in formatted style
@@ -320,23 +358,6 @@ def clean_residual_positions(symbol):
 # ==============================
 # 🔧 Symbol tick & trailing helpers
 # ==============================
-
-def get_symbol_tick_size(symbol):
-    """Fetch the tick size for symbol precision."""
-    try:
-        url = f"{BASE_URL}/fapi/v1/exchangeInfo"
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        for s in data["symbols"]:
-            if s["symbol"] == symbol:
-                for f in s["filters"]:
-                    if f["filterType"] == "PRICE_FILTER":
-                        return float(f["tickSize"])
-    except Exception as e:
-        print(f"⚠️ Tick size fetch error for {symbol}: {e}")
-    return 0.0001
-
 
 def compute_ts_dynamic(entry_price, side, current_price,
                        activation_pct=TRAILING_ACTIVATION_PCT,
@@ -493,20 +514,29 @@ def monitor_trailing_and_exit(symbol, side):
                 dyn["notified"] = True
 
             # Compute dynamic trailing stop (fixed)
-            distance_pct = compute_ts_dynamic(entry_price, side, current_price)
+            raw_stop = compute_ts_dynamic(entry_price, side, current_price)
 
-            if distance_pct is None:
+            if raw_stop is None:
                 time.sleep(1)
                 continue
 
-            high_offset, low_offset = calculate_trailing_offsets(entry_price, side, TRAILING_DISTANCE_PCT)
+            # raw_stop is numeric stop price; apply tick rounding & hysteresis (minimal movement threshold)
+            tick = get_symbol_tick_size(symbol)
+            try:
+                new_stop = round_to_tick(raw_stop, symbol)
+            except Exception:
+                new_stop = round(raw_stop, 8)
 
-            if side.upper() == "BUY":
-                stop_price = max(entry_price, current_price * (1 - TRAILING_DISTANCE_PCT))
-            else:
-                stop_price = min(entry_price, current_price * (1 + TRAILING_DISTANCE_PCT))
+            prev_stop = dyn.get("stop_price")
+            hysteresis = max(tick * TRAILING_HYSTERESIS_TICKS, tick)
 
-            dyn["stop_price"] = round(stop_price, 8)
+            # If previous stop exists and change is less than hysteresis, skip update to avoid micro churn
+            if prev_stop is not None and abs(new_stop - prev_stop) < hysteresis:
+                # don't update; wait for a meaningful move
+                time.sleep(max(1, TRAILING_UPDATE_INTERVAL))
+                continue
+
+            dyn["stop_price"] = new_stop
             dyn["locked_pnl_usd"] = compute_locked_pnl(entry_price, dyn["stop_price"], side, trade.get("quantity", 0))
 
             # If stop hit
