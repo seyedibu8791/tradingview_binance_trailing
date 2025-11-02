@@ -1,6 +1,6 @@
-# ================================
-# trade_notifier.py (FINAL FIXED)
-# ================================
+# ============================================
+# ✅ trade_notifier.py (FINAL - Production Ready)
+# ============================================
 import requests
 import threading
 import time
@@ -10,7 +10,7 @@ import hashlib
 from typing import Optional
 
 # ===============================
-# ✅ IMPORTS FROM CONFIG
+# 🔧 IMPORTS FROM CONFIG
 # ===============================
 from config import (
     BINANCE_API_KEY,
@@ -33,8 +33,9 @@ from config import (
 # =======================
 # 📦 STORAGE
 # =======================
-trades = {}              # {symbol: {...trade info...}}
-notified_orders = set()  # prevent duplicate entry notifications
+trades = {}
+notified_orders = set()
+_symbol_tick_cache = {}  # cache tick size per symbol
 
 
 # =======================
@@ -84,6 +85,37 @@ def _signed_post(path: str, params: dict):
 
 
 # =======================
+# ⚙️ SYMBOL TICK SIZE
+# =======================
+def get_symbol_tick_size(symbol: str) -> float:
+    """Fetch and cache Binance symbol tick size to apply hysteresis."""
+    symbol = symbol.upper()
+    if symbol in _symbol_tick_cache:
+        return _symbol_tick_cache[symbol]
+    try:
+        info = requests.get(f"{BASE_URL}/fapi/v1/exchangeInfo", timeout=10).json()
+        for s in info.get("symbols", []):
+            if s.get("symbol") == symbol:
+                for f in s.get("filters", []):
+                    if f.get("filterType") == "PRICE_FILTER":
+                        tick = float(f.get("tickSize"))
+                        _symbol_tick_cache[symbol] = tick
+                        return tick
+    except Exception as e:
+        if DEBUG:
+            print(f"⚠️ Tick size fetch error for {symbol}: {e}")
+    return 0.01
+
+
+def round_to_tick(value: float, symbol: str) -> float:
+    """Round value to nearest valid tick step."""
+    tick = get_symbol_tick_size(symbol)
+    if tick <= 0:
+        return round(value, 8)
+    return round(round(value / tick) * tick, 8)
+
+
+# =======================
 # 🔎 POSITION HELPERS
 # =======================
 def get_position_info(symbol: str) -> Optional[dict]:
@@ -121,14 +153,14 @@ def get_unrealized_pnl_pct(symbol: str) -> Optional[float]:
 
 
 # =======================
-# 🔒 CLOSE TRADE ON BINANCE
+# 🔒 CLOSE TRADE
 # =======================
 def close_trade_on_binance(symbol: str, side: str):
     try:
         pos = get_position_info(symbol)
         if not pos:
             if DEBUG:
-                print(f"⚠️ No open position found for {symbol}.")
+                print(f"⚠️ No open position for {symbol}.")
             return {"status": "no_position"}
         amt = abs(float(pos.get("positionAmt", 0)))
         close_side = "SELL" if side.upper() == "BUY" else "BUY"
@@ -143,12 +175,11 @@ def close_trade_on_binance(symbol: str, side: str):
 
 
 # =======================
-# 🟩 TRADE ENTRY
+# 🟩 ENTRY LOGIC
 # =======================
-def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, interval: str):
+def log_trade_entry(symbol, side, order_id, filled_price, interval):
     if symbol in trades and trades[symbol].get("closed"):
         trades.pop(symbol, None)
-
     if order_id in notified_orders:
         return
     notified_orders.add(order_id)
@@ -158,125 +189,116 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, 
         "entry_price": filled_price,
         "order_id": order_id,
         "closed": False,
-        "exit_price": None,
-        "pnl": 0.0,
-        "pnl_percent": 0.0,
-        "forced_exit": False,
-        "recovered": False,
-        "entry_time": time.time(),
         "interval": interval.lower(),
-        "trail_active": False
+        "trail_active": False,
+        "dynamic_offset": 0.0,
+        "stop_price": None,
+        "entry_time": time.time()
     }
 
-    direction_emoji = "🟩⬆️" if side.upper() == "BUY" else "🟥⬇️"
-    msg = (
-        f"{direction_emoji} <b>{side.upper()} ENTRY</b>\n"
+    emoji = "🟩⬆️" if side.upper() == "BUY" else "🟥⬇️"
+    send_telegram_message(
+        f"{emoji} <b>{side.upper()} ENTRY</b>\n"
         f"┇#{symbol}\n"
         f"┇Entry: {filled_price}\n"
         f"┇Interval: {interval}\n"
         f"┇Leverage: {LEVERAGE}x | Amount: ${TRADE_AMOUNT}\n"
-        f"┇<i>Dynamic Trailing & Risk Monitor Active</i>"
+        f"┇<i>Dynamic Trailing Active</i>"
     )
-    send_telegram_message(msg)
 
 
 # =======================
-# 🟥 TRADE EXIT
+# 🎯 compute_ts_dynamic
 # =======================
-def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
-    t = trades.get(symbol)
-    if not t or t.get("closed"):
-        return
+def compute_ts_dynamic(symbol, entry_price, side, current_price):
+    try:
+        pnl_pct = get_unrealized_pnl_pct(symbol)
+        if pnl_pct is None:
+            return None, None
+        profit_abs = abs(pnl_pct)
 
-    t["closed"] = True
-    t["exit_price"] = filled_price
+        if profit_abs < TSI_PRIMARY_TRIGGER_PCT:
+            return None, None
 
-    live_pct = get_unrealized_pnl_pct(symbol)
-    pnl_percent = live_pct if live_pct is not None else t.get("pnl_percent", 0.0)
-    pnl_value = (pnl_percent / 100.0) * TRADE_AMOUNT
+        lower_bound = TSI_PRIMARY_TRIGGER_PCT
+        upper_bound = 10.0
+        if profit_abs <= lower_bound:
+            offset_pct = TSI_LOW_PROFIT_OFFSET_PCT
+        elif profit_abs >= upper_bound:
+            offset_pct = TSI_HIGH_PROFIT_OFFSET_PCT
+        else:
+            span = TSI_HIGH_PROFIT_OFFSET_PCT - TSI_LOW_PROFIT_OFFSET_PCT
+            scale = (profit_abs - lower_bound) / (upper_bound - lower_bound)
+            offset_pct = TSI_LOW_PROFIT_OFFSET_PCT + span * scale
 
-    t["pnl"] = round(pnl_value, 2)
-    t["pnl_percent"] = round(pnl_percent or 0.0, 2)
+        # Symmetric stop calc
+        if side.upper() == "BUY":
+            stop_price = current_price * (1 - offset_pct / 100.0)
+            stop_price = max(entry_price, stop_price)
+        else:
+            stop_price = current_price * (1 + offset_pct / 100.0)
+            stop_price = min(entry_price, stop_price)
 
-    emoji = "💰✅" if t["pnl_percent"] > 0 else "💔⛔️" if t["pnl_percent"] < 0 else "⚪️"
-    reason_text = {
-        "STOP_LOSS": "🚨 Stoploss Triggered",
-        "FORCE_CLOSE": "⚠️ 2-Bar Loss Exit",
-        "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
-        "MARKET_CLOSE": "✅ Market Close",
-        "SAME_DIRECTION_REENTRY": "🔁 Same-Direction Re-entry Close",
-        "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Close",
-        "NORMAL": "✅ Normal Close"
-    }.get(reason, reason)
+        # 🧭 Apply tick-size hysteresis rounding
+        stop_price = round_to_tick(stop_price, symbol)
+        offset_pct = round(offset_pct, 6)
 
-    msg = (
-        f"{emoji} <b>{reason_text}</b>\n"
-        f"┇#{symbol}\n"
-        f"┇{t['side']} | Entry: {t['entry_price']} → Exit: {filled_price}\n"
-        f"┇PnL: <b>{t['pnl']}$</b> | {t['pnl_percent']}%\n"
-        f"┇Reason: <i>{reason}</i>"
-    )
-    send_telegram_message(msg)
-
-
-# =======================
-# 🎯 TRAILING START
-# =======================
-def log_trailing_start(symbol: str, pnl_percent: float):
-    t = trades.get(symbol)
-    if not t or t.get("closed"):
-        return
-
-    t["trail_active"] = True
-    t["trail_start_time"] = time.time()
-    t["trail_start_pct"] = pnl_percent
-
-    msg = (
-        f"🎯 <b>{symbol}</b> Trailing Started\n"
-        f"┇Activation: {pnl_percent}%\n"
-        f"┇Interval: {t.get('interval', 'N/A')}\n"
-        f"┇Side: {t.get('side', '')}\n"
-        f"┇<i>Dynamic trailing now active</i>"
-    )
-    send_telegram_message(msg)
+        return stop_price, offset_pct
+    except Exception as e:
+        if DEBUG:
+            print("⚠️ compute_ts_dynamic error:", e)
+        return None, None
 
 
 # =======================
 # 📉 LOSS & TRAIL MONITOR
 # =======================
-def check_loss_conditions(symbol: str, current_price: float = None):
+def check_loss_conditions(symbol, current_price=None):
     if symbol not in trades or trades[symbol].get("closed"):
         return
-
     t = trades[symbol]
-    pnl_percent = get_unrealized_pnl_pct(symbol)
-    if pnl_percent is None:
+    pnl = get_unrealized_pnl_pct(symbol)
+    if pnl is None:
         return
 
-    # === 2-Bar Exit Check ===
-    bar_durations = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
-    bar_duration = bar_durations.get(t["interval"], 3600)
-    elapsed = time.time() - t["entry_time"]
-
-    if elapsed >= 2 * bar_duration and pnl_percent < 0 and not t.get("forced_exit"):
+    # 2-bar forced exit
+    dur = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+    if time.time() - t["entry_time"] >= 2 * dur.get(t["interval"], 3600) and pnl < 0 and not t.get("forced_exit"):
         t["forced_exit"] = True
-        send_telegram_message(f"⚠️ <b>{symbol}</b> 2-bar negative → Force closing trade")
+        send_telegram_message(f"⚠️ <b>{symbol}</b> 2-bar negative → Force closing")
         close_trade_on_binance(symbol, t["side"])
-        log_trade_exit(symbol, current_price or t["entry_price"], reason="FORCE_CLOSE")
         return
 
-    # === Trailing Stop Activation ===
-    if not t.get("trail_active") and pnl_percent >= TRAILING_ACTIVATION_PCT:
-        log_trailing_start(symbol, pnl_percent)
+    # Activate trailing
+    if not t.get("trail_active") and pnl >= TRAILING_ACTIVATION_PCT:
+        t["trail_active"] = True
+        send_telegram_message(f"🎯 {symbol} Trailing Activated @ {pnl}%")
 
-    # === Dynamic Trailing Logic ===
-    if t.get("trail_active"):
-        if pnl_percent <= (TRAILING_ACTIVATION_PCT - TS_LOW_OFFSET_PCT):
-            send_telegram_message(f"🎯 <b>{symbol}</b> Trailing stop hit — closing")
-            close_trade_on_binance(symbol, t["side"])
-            log_trade_exit(symbol, current_price or t["entry_price"], reason="TRAIL_CLOSE")
-            t["trail_active"] = False
+    if not t.get("trail_active"):
+        return
+
+    if current_price is None:
+        pos = get_position_info(symbol)
+        current_price = float(pos.get("markPrice")) if pos and pos.get("markPrice") else None
+        if not current_price:
             return
+
+    stop_price, offset_pct = compute_ts_dynamic(symbol, t["entry_price"], t["side"], current_price)
+    if stop_price is None:
+        return
+
+    t["stop_price"] = stop_price
+    t["dynamic_offset"] = offset_pct
+
+    # Hit logic symmetric
+    if t["side"] == "BUY" and current_price <= stop_price:
+        send_telegram_message(f"🎯 {symbol} BUY Trailing Stop Hit\nStop: {stop_price}\nOffset: {offset_pct}%")
+        close_trade_on_binance(symbol, t["side"])
+        t["trail_active"] = False
+    elif t["side"] == "SELL" and current_price >= stop_price:
+        send_telegram_message(f"🎯 {symbol} SELL Trailing Stop Hit\nStop: {stop_price}\nOffset: {offset_pct}%")
+        close_trade_on_binance(symbol, t["side"])
+        t["trail_active"] = False
 
 
 # =======================
@@ -285,34 +307,12 @@ def check_loss_conditions(symbol: str, current_price: float = None):
 def send_daily_summary():
     while True:
         now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5.5)))
-        next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
-        time.sleep((next_run - now).total_seconds())
+        nxt = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
+        time.sleep((nxt - now).total_seconds())
 
         closed = [t for t in trades.values() if t.get("closed")]
-        total = len(trades)
-        win = sum(1 for t in closed if t.get("pnl", 0) > 0)
-        loss = sum(1 for t in closed if t.get("pnl", 0) < 0)
-        open_ = sum(1 for t in trades.values() if not t.get("closed"))
-        net_pnl = round(sum(t.get("pnl_percent", 0) for t in closed), 2)
-
-        details = ""
-        for s, t in trades.items():
-            if t.get("closed"):
-                icon = "✅" if t.get("pnl", 0) > 0 else "⛔️"
-                details += f"#{s} {icon} {t['side']} | {t.get('pnl_percent')}% | ${t.get('pnl')}\n"
-
-        msg = (
-            f"{details}\n"
-            f"📅 <b>Daily Summary</b>\n"
-            f"📊 Total Trades: {total}\n"
-            f"✔️ Profitable: {win} | ✖️ Lost: {loss}\n"
-            f"◼️ Open Trades: {open_}\n"
-            f"✅ Net PnL %: {net_pnl}%"
-        )
+        msg = f"📅 Daily Summary ({len(closed)} closed)"
         send_telegram_message(msg)
-        for s in list(trades.keys()):
-            if trades[s].get("closed"):
-                trades.pop(s, None)
 
 
 threading.Thread(target=send_daily_summary, daemon=True).start()
