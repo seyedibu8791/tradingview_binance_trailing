@@ -206,6 +206,31 @@ def log_trade_entry(symbol, side, order_id, filled_price, interval):
         f"┇<i>Dynamic Trailing Active</i>"
     )
 
+# =======================
+# 🟥 EXIT LOGIC
+# =======================
+def log_trade_exit(symbol, exit_price, reason="EXIT"):
+    """Logs and notifies when a trade is closed."""
+    if symbol not in trades:
+        return
+
+    t = trades[symbol]
+    t["closed"] = True
+    t["exit_price"] = exit_price
+    t["exit_reason"] = reason
+    t["exit_time"] = time.time()
+
+    emoji = "✅" if reason != "STOP_LOSS" else "⚠️"
+    pnl = get_unrealized_pnl_pct(symbol)
+    send_telegram_message(
+        f"{emoji} <b>{symbol}</b> EXIT\n"
+        f"┇Reason: {reason}\n"
+        f"┇Exit Price: {exit_price}\n"
+        f"┇Entry: {t.get('entry_price')}\n"
+        f"┇PnL%: {pnl if pnl is not None else 'N/A'}\n"
+        f"┇Duration: {round((time.time() - t.get('entry_time', time.time())) / 60, 1)} min"
+    )
+
 
 # =======================
 # 🎯 compute_ts_dynamic
