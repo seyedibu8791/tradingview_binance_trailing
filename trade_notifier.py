@@ -1,5 +1,5 @@
 # ================================
-# trade_notifier.py (AUTO-TRAIL SYNC)
+# trade_notifier.py (AUTO-TRAIL SYNC))
 # ================================
 import requests
 import threading
