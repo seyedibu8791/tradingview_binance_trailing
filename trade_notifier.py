@@ -1,5 +1,5 @@
 # ============================================
-# ✅ trade_notifier.py (FINAL - Fixed Dynamic Trailing Closure + compatibility)
+# ✅ trade_notifier.py (FINAL - Fixed Dynamic Trailing Closure + compatibility))
 # ============================================
 import requests, threading, time, datetime, hmac, hashlib
 from typing import Optional
