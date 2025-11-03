@@ -633,21 +633,45 @@ def global_trailing_monitor():
                             else:
                                 dyn["trough_pnl"] = min(pnl_percent, dyn.get("trough_pnl", 999))
 
-                        # Compute adaptive trailing offset (linear interpolation)
-                        profit_zone = min(max(abs(pnl_percent), 0.0), 10.0)
-                        dynamic_offset = (
-                            TSI_LOW_PROFIT_OFFSET_PCT +
-                            (TSI_HIGH_PROFIT_OFFSET_PCT - TSI_LOW_PROFIT_OFFSET_PCT) * (profit_zone / 10.0)
-                        )
+# Compute adaptive trailing offset (linear interpolation)
+profit_zone = min(max(abs(pnl_percent), 0.0), 10.0)
+dynamic_offset = (
+    TSI_LOW_PROFIT_OFFSET_PCT +
+    (TSI_HIGH_PROFIT_OFFSET_PCT - TSI_LOW_PROFIT_OFFSET_PCT) * (profit_zone / 10.0)
+)
 
-                        stop_candidate = compute_ts_dynamic(
-                            entry_price, side, current_price,
-                            activation_pct=TRAILING_ACTIVATION_PCT,
-                            trail_pct=dynamic_offset if dynamic_offset > 0 else TRAILING_DISTANCE_PCT
-                        )
+# --- Maintain peak/trough price since activation (important!)
+# dyn may have been initialized at entry; ensure keys exist
+with trades_lock:
+    # initialize peak/trough if absent
+    if "peak" not in dyn:
+        dyn["peak"] = entry_price
+    if "trough" not in dyn:
+        dyn["trough"] = entry_price
 
-                        if stop_candidate is None:
-                            continue
+    if side == "BUY":
+        # update peak to the highest seen price
+        if current_price > dyn.get("peak", entry_price):
+            dyn["peak"] = current_price
+        price_for_stop_calc = dyn["peak"]
+    else:
+        # update trough to the lowest seen price
+        if current_price < dyn.get("trough", entry_price):
+            dyn["trough"] = current_price
+        price_for_stop_calc = dyn["trough"]
+
+# Compute stop_candidate using the peak/trough (not the instantaneous current price)
+stop_candidate = compute_ts_dynamic(
+    entry_price,
+    side,
+    price_for_stop_calc,  # <-- use peak/trough here
+    activation_pct=TRAILING_ACTIVATION_PCT,
+    trail_pct=dynamic_offset if dynamic_offset > 0 else TRAILING_DISTANCE_PCT
+)
+
+if stop_candidate is None:
+    continue
+
 
                         # --- Tighten trailing stop ---
                         with trades_lock:
