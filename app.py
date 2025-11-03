@@ -466,13 +466,18 @@ def monitor_trailing_and_exit(symbol, side):
 def global_trailing_monitor():
     """
     Continuously monitor all open trades and update trailing stops in a TradingView-like manner.
-    Uses TSI interpolation between low/high offsets to tighten the trail as profit increases.
+    This function fully mimics TradingView's live trailing logic:
+    - Activates trail after a target profit threshold (activation_pct)
+    - Dynamically tightens the stop as profit grows
+    - Closes the trade when price crosses the live stop
     """
     print("🛰️ Global trailing monitor started")
     while True:
         try:
+            # Collect all trades with active trailing monitors
             with trades_lock:
                 symbols = [s for s, t in trades.items() if not t.get("closed", True) and t.get("trailing_monitor_started", False)]
+
             for symbol in symbols:
                 try:
                     with trades_lock:
@@ -488,16 +493,19 @@ def global_trailing_monitor():
                     if current_price <= 0:
                         continue
 
-                    # get live pnl% (prefer trade_notifier helper)
+                    # --- Compute live PnL% (prefer helper if available) ---
                     try:
                         pnl_percent = get_unrealized_pnl_pct(symbol) or 0.0
                     except Exception:
-                        if side == "BUY":
-                            pnl_percent = ((current_price - entry_price) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
+                        if entry_price > 0:
+                            if side == "BUY":
+                                pnl_percent = ((current_price - entry_price) / entry_price) * 100 * LEVERAGE
+                            else:
+                                pnl_percent = ((entry_price - current_price) / entry_price) * 100 * LEVERAGE
                         else:
-                            pnl_percent = ((entry_price - current_price) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
+                            pnl_percent = 0.0
 
-                    # Immediate stoploss check (hard stop)
+                    # --- Immediate stoploss check (hard stop) ---
                     try:
                         immediate_threshold = -STOP_LOSS_PCT * LEVERAGE
                         if pnl_percent <= immediate_threshold and not trade.get("forced_exit", False):
@@ -513,16 +521,9 @@ def global_trailing_monitor():
                     except Exception as e:
                         print("❌ Immediate stoploss check error:", e)
 
-                    # Optional: preserve earlier loss checks
-                    try:
-                        check_loss_conditions(symbol, current_price=current_price)
-                    except Exception:
-                        pass
-
-                    # Trailing activation check
+                    # --- Trailing activation ---
                     activated = abs(pnl_percent) >= dyn.get("activation_pct", TRAILING_ACTIVATION_PCT)
 
-                    # If not activated yet and activation met, mark and send message
                     if not dyn.get("active", False) and activated:
                         with trades_lock:
                             dyn["active"] = True
@@ -537,48 +538,42 @@ def global_trailing_monitor():
                             with trades_lock:
                                 dyn["notified"] = True
 
-                    # If trailing active, update peak/trough
+                    # --- Active trailing update ---
                     if dyn.get("active", False):
                         with trades_lock:
                             if side == "BUY":
-                                if pnl_percent > dyn.get("peak_pnl", -999):
-                                    dyn["peak_pnl"] = pnl_percent
+                                dyn["peak_pnl"] = max(pnl_percent, dyn.get("peak_pnl", -999))
                             else:
-                                if pnl_percent < dyn.get("trough_pnl", 999):
-                                    dyn["trough_pnl"] = pnl_percent
+                                dyn["trough_pnl"] = min(pnl_percent, dyn.get("trough_pnl", 999))
 
-                        # compute adaptive offset (TSI interpolation)
-                        # clamp profit zone 0 - 10 for interpolation (same idea as TradingView linear map)
+                        # Compute adaptive trailing offset (linear interpolation)
                         profit_zone = min(max(abs(pnl_percent), 0.0), 10.0)
                         dynamic_offset = (
                             TSI_LOW_PROFIT_OFFSET_PCT +
                             (TSI_HIGH_PROFIT_OFFSET_PCT - TSI_LOW_PROFIT_OFFSET_PCT) * (profit_zone / 10.0)
                         )
 
-                        # compute candidate stop using compute_ts_dynamic (price-driven)
-                        stop_candidate = compute_ts_dynamic(entry_price, side, current_price,
-                                                            activation_pct=TRAILING_ACTIVATION_PCT,
-                                                            trail_pct=dynamic_offset if dynamic_offset > 0 else TRAILING_DISTANCE_PCT)
+                        stop_candidate = compute_ts_dynamic(
+                            entry_price, side, current_price,
+                            activation_pct=TRAILING_ACTIVATION_PCT,
+                            trail_pct=dynamic_offset if dynamic_offset > 0 else TRAILING_DISTANCE_PCT
+                        )
 
                         if stop_candidate is None:
                             continue
 
-                        # Update dyn.stop_price only if it's tighter (never loosen)
+                        # --- Tighten trailing stop ---
                         with trades_lock:
                             prev_stop = dyn.get("stop_price")
                             if side == "BUY":
-                                # buy: stop should increase (tighten) as price moves up
                                 if prev_stop is None or stop_candidate > prev_stop:
                                     dyn["stop_price"] = stop_candidate
                             else:
-                                # sell: stop should decrease (tighten) as price moves down
                                 if prev_stop is None or stop_candidate < prev_stop:
                                     dyn["stop_price"] = stop_candidate
-
-                            # store locked pnl calc for info
                             dyn["locked_pnl_usd"] = compute_locked_pnl(entry_price, dyn["stop_price"], side, qty)
 
-                        # check exit condition: price hit the stop
+                        # --- Exit if price hits trailing stop ---
                         with trades_lock:
                             sp = dyn.get("stop_price")
                         if sp is None:
@@ -587,7 +582,6 @@ def global_trailing_monitor():
                         if side == "BUY" and current_price <= sp:
                             send_telegram_message(f"🎯 <b>{symbol}</b> Dynamic trailing stop hit (BUY). Stop: {sp} Current: {current_price}")
                             execute_market_exit(symbol, side)
-                            # ensure we mark closed; wait_and_notify_filled_exit will finalize
                             continue
 
                         if side == "SELL" and current_price >= sp:
@@ -597,9 +591,11 @@ def global_trailing_monitor():
 
                 except Exception as inner_e:
                     print(f"⚠️ Error processing trailing for {symbol}: {inner_e}")
+
         except Exception as e:
             print(f"⚠️ Global trailing monitor error: {e}")
 
+        # Loop frequency control
         time.sleep(max(1, TRAILING_UPDATE_INTERVAL))
 
 
