@@ -21,7 +21,6 @@ from config import (
 from trade_notifier import (
     log_trade_entry,
     log_trade_exit,
-    check_loss_conditions,
     send_telegram_message,
     get_unrealized_pnl_pct,
     log_trailing_start,
