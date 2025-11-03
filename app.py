@@ -361,26 +361,88 @@ def compute_ts_dynamic(entry_price, side, current_price,
                        activation_pct=TRAILING_ACTIVATION_PCT,
                        trail_pct=TRAILING_DISTANCE_PCT):
     """
-    Compute dynamic trailing stop price (adaptive to current price).
-    - activation_pct: threshold % at which trailing activates.
-    - trail_pct: % distance used once trailing is active.
-    Returns a stop price if active, else None.
+    Slope-based dynamic trailing stop (replicates TradingView's ts_dynamic logic).
+
+    - Uses unleveraged price-change % for interpolation:
+        profit_pct = abs(current_price - entry_price) / entry_price * 100
+
+    - Interpolates trailing offset between low/high offsets:
+        dynamic_pct = max( (ts_high - ts_low)/9.5 * (profit_pct - 0.5) + ts_low, ts_low )
+
+    - activation_pct and trail_pct can be provided either as:
+        * decimal fractions (e.g. 0.002 meaning 0.2%), OR
+        * percent values (e.g. 0.2 meaning 0.2%)
+      The function normalizes them automatically.
+
+    Returns:
+      stop_price (float) if trailing is active and a candidate stop can be computed,
+      otherwise None.
     """
     try:
+        # basic guards
+        if entry_price <= 0 or current_price <= 0:
+            return None
+
+        # --- normalize activation_pct and trail_pct to "percent units" (e.g. 0.2 means 0.2%)
+        def _to_percent(p):
+            # if passed as small decimal (e.g. 0.002) -> convert to 0.2
+            try:
+                p = float(p)
+            except Exception:
+                return 0.0
+            if abs(p) < 1.0:
+                return p * 100.0
+            return p
+
+        activation_pct_norm = _to_percent(activation_pct)
+        # trail_pct argument may be used as fallback; but we'll prefer TSI offsets for slope below
+        trail_pct_norm = _to_percent(trail_pct)
+
+        # Use the TSI low/high offsets imported from config if available (these are the
+        # interpolation endpoints analogous to ts_low_profit & ts_high_profit in Pine).
+        # They may be decimal (e.g. 0.001) or percent (e.g. 0.1) — normalize them.
+        try:
+            ts_low = _to_percent(TSI_LOW_PROFIT_OFFSET_PCT)
+            ts_high = _to_percent(TSI_HIGH_PROFIT_OFFSET_PCT)
+        except Exception:
+            ts_low = trail_pct_norm
+            ts_high = trail_pct_norm
+
+        # Compute raw (unleveraged) profit percent like TradingView does
         if side.upper() == "BUY":
-            activation_price = entry_price * (1 + activation_pct / 100.0)
-            if current_price >= activation_price:
-                stop_price = current_price * (1 - trail_pct / 100.0)
-                return round(stop_price, 8)
-        elif side.upper() == "SELL":
-            activation_price = entry_price * (1 - activation_pct / 100.0)
-            if current_price <= activation_price:
-                stop_price = current_price * (1 + trail_pct / 100.0)
-                return round(stop_price, 8)
-        return None
+            profit_pct = abs((current_price - entry_price) / entry_price) * 100.0
+        else:
+            profit_pct = abs((entry_price - current_price) / entry_price) * 100.0
+
+        # --- Activation: must reach primary trigger percent (TSI)
+        # Note: activation_pct_norm is in "percent" units (e.g. 0.2)
+        if profit_pct < activation_pct_norm:
+            return None
+
+        # --- Compute slope-based dynamic offset (identical to Pine's formula)
+        # dynamic_pct = max( (ts_high - ts_low)/9.5 * (x - 0.5) + ts_low, ts_low )
+        slope = (ts_high - ts_low) / 9.5 if 9.5 != 0 else 0.0
+        dynamic_pct = slope * (profit_pct - 0.5) + ts_low
+        # ensure not below the low bound
+        if dynamic_pct < ts_low:
+            dynamic_pct = ts_low
+
+        # If dynamic_pct is nonsensical (<=0) fall back to trail_pct_norm
+        if dynamic_pct <= 0:
+            dynamic_pct = trail_pct_norm
+
+        # --- Compute stop price
+        if side.upper() == "BUY":
+            stop_price = current_price * (1.0 - dynamic_pct / 100.0)
+        else:
+            stop_price = current_price * (1.0 + dynamic_pct / 100.0)
+
+        return round(stop_price, 8)
+
     except Exception as e:
-        print(f"⚠️ compute_ts_dynamic error: {e}")
+        print(f"⚠️ compute_ts_dynamic (slope) error: {e}")
         return None
+
 
 
 def calculate_trailing_offsets(entry_price, side,
