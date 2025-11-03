@@ -1,5 +1,5 @@
 # ============================================
-# ✅ trade_notifier.py (FINAL - Production Ready)
+# ✅ trade_notifier.py (FINAL - Continuous Dynamic Trailing)
 # ============================================
 import requests
 import threading
@@ -211,7 +211,6 @@ def log_trade_entry(symbol, side, order_id, filled_price, interval):
 # 🎯 TRAILING START LOG
 # =======================
 def log_trailing_start(symbol: str):
-    """Simple notifier when trailing starts."""
     send_telegram_message(f"🎯 Trailing started for <b>{symbol}</b>")
 
 
@@ -219,10 +218,8 @@ def log_trailing_start(symbol: str):
 # 🟥 EXIT LOGIC
 # =======================
 def log_trade_exit(symbol, exit_price, reason="EXIT"):
-    """Logs and notifies when a trade is closed."""
     if symbol not in trades:
         return
-
     t = trades[symbol]
     t["closed"] = True
     t["exit_price"] = exit_price
@@ -240,7 +237,6 @@ def log_trade_exit(symbol, exit_price, reason="EXIT"):
         f"┇Duration: {round((time.time() - t.get('entry_time', time.time())) / 60, 1)} min"
     )
 
-# (remaining functions unchanged: compute_ts_dynamic, check_loss_conditions, send_daily_summary)
 
 # =======================
 # 🎯 compute_ts_dynamic
@@ -251,7 +247,6 @@ def compute_ts_dynamic(symbol, entry_price, side, current_price):
         if pnl_pct is None:
             return None, None
         profit_abs = abs(pnl_pct)
-
         if profit_abs < TSI_PRIMARY_TRIGGER_PCT:
             return None, None
 
@@ -266,7 +261,7 @@ def compute_ts_dynamic(symbol, entry_price, side, current_price):
             scale = (profit_abs - lower_bound) / (upper_bound - lower_bound)
             offset_pct = TSI_LOW_PROFIT_OFFSET_PCT + span * scale
 
-        # Symmetric stop calc
+        # Symmetric stop calculation
         if side.upper() == "BUY":
             stop_price = current_price * (1 - offset_pct / 100.0)
             stop_price = max(entry_price, stop_price)
@@ -274,10 +269,8 @@ def compute_ts_dynamic(symbol, entry_price, side, current_price):
             stop_price = current_price * (1 + offset_pct / 100.0)
             stop_price = min(entry_price, stop_price)
 
-        # 🧭 Apply tick-size hysteresis rounding
         stop_price = round_to_tick(stop_price, symbol)
         offset_pct = round(offset_pct, 6)
-
         return stop_price, offset_pct
     except Exception as e:
         if DEBUG:
@@ -322,18 +315,39 @@ def check_loss_conditions(symbol, current_price=None):
     if stop_price is None:
         return
 
+    tick = get_symbol_tick_size(symbol)
+    hysteresis = 2 * tick
+
     t["stop_price"] = stop_price
     t["dynamic_offset"] = offset_pct
 
-    # Hit logic symmetric
-    if t["side"] == "BUY" and current_price <= stop_price:
+    # Trailing hit logic
+    if t["side"] == "BUY" and current_price <= stop_price - hysteresis:
         send_telegram_message(f"🎯 {symbol} BUY Trailing Stop Hit\nStop: {stop_price}\nOffset: {offset_pct}%")
         close_trade_on_binance(symbol, t["side"])
         t["trail_active"] = False
-    elif t["side"] == "SELL" and current_price >= stop_price:
+    elif t["side"] == "SELL" and current_price >= stop_price + hysteresis:
         send_telegram_message(f"🎯 {symbol} SELL Trailing Stop Hit\nStop: {stop_price}\nOffset: {offset_pct}%")
         close_trade_on_binance(symbol, t["side"])
         t["trail_active"] = False
+
+
+# =======================
+# 🕒 CONTINUOUS TRAIL MONITOR
+# =======================
+def continuous_trail_monitor():
+    """Continuously checks all open trades for trailing updates."""
+    while True:
+        try:
+            for sym in list(trades.keys()):
+                check_loss_conditions(sym)
+        except Exception as e:
+            if DEBUG:
+                print("⚠️ continuous_trail_monitor error:", e)
+        time.sleep(3)  # check every 3 seconds
+
+
+threading.Thread(target=continuous_trail_monitor, daemon=True).start()
 
 
 # =======================
@@ -344,7 +358,6 @@ def send_daily_summary():
         now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5.5)))
         nxt = now.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=1)
         time.sleep((nxt - now).total_seconds())
-
         closed = [t for t in trades.values() if t.get("closed")]
         msg = f"📅 Daily Summary ({len(closed)} closed)"
         send_telegram_message(msg)
