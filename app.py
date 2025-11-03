@@ -1,4 +1,4 @@
-# app.py ((UPDATED - integrated with trade_notifier))
+# app.py (UPDATED - integrated with trade_notifier + global trailing monitor)
 from flask import Flask, request, jsonify
 import requests, hmac, hashlib, time, threading, os
 from threading import Lock
@@ -11,16 +11,13 @@ from config import (
     TS_LOW_OFFSET_PCT, TS_HIGH_OFFSET_PCT,
     TSI_PRIMARY_TRIGGER_PCT, TSI_LOW_PROFIT_OFFSET_PCT, TSI_HIGH_PROFIT_OFFSET_PCT,
     TRAILING_UPDATE_INTERVAL, STOP_LOSS_PCT,    # added STOP_LOSS_PCT and TRAILING_UPDATE_INTERVAL
-    # optional toggle you asked about:
-    # set USE_TRAILING_STOP=True/False in env if you want to switch off trailing
-    # NOTE: if USE_TRAILING_STOP not present in config, you can add it there.
-    # We'll try to import; if absent, default to True.
 )
 
 # Import notifier & shared trades from trade_notifier so both modules operate on same state
 from trade_notifier import (
     log_trade_entry,
     log_trade_exit,
+    check_loss_conditions,
     send_telegram_message,
     get_unrealized_pnl_pct,
     log_trailing_start,
@@ -46,43 +43,6 @@ trades = notifier_trades
 
 # Thread lock for safe multi-threaded updates
 trades_lock = Lock()
-
-# =======================
-# Tick-size cache & hysteresis config
-# =======================
-_symbol_tick_cache = {}
-# Multiplier (number of ticks) used as hysteresis before accepting an updated stop.
-# Follow TradingView style: keep it minimal; make configurable via env if you want.
-TRAILING_HYSTERESIS_TICKS = int(os.getenv("TRAILING_HYSTERESIS_TICKS", "1"))
-
-def get_symbol_tick_size(symbol):
-    """Fetch and cache the tick size for symbol precision."""
-    symbol = symbol.upper()
-    if symbol in _symbol_tick_cache:
-        return _symbol_tick_cache[symbol]
-    try:
-        url = f"{BASE_URL}/fapi/v1/exchangeInfo"
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-        data = response.json()
-        for s in data["symbols"]:
-            if s["symbol"] == symbol:
-                for f in s["filters"]:
-                    if f["filterType"] == "PRICE_FILTER":
-                        tick = float(f["tickSize"])
-                        _symbol_tick_cache[symbol] = tick
-                        return tick
-    except Exception as e:
-        print(f"⚠️ Tick size fetch error for {symbol}: {e}")
-    # fallback default tick
-    return 0.0001
-
-def round_to_tick(value, symbol):
-    """Round value to nearest valid tick step for the symbol."""
-    tick = get_symbol_tick_size(symbol)
-    if tick <= 0:
-        return round(value, 8)
-    return round(round(value / tick) * tick, 8)
 
 # --------- Binance signed request helper ----------
 def binance_signed_request(http_method, path, params=None):
@@ -191,6 +151,7 @@ def open_position(symbol, side, limit_price):
                 "exit_price": None,
                 "pnl": 0,
                 "pnl_percent": 0,
+                "quantity": qty,
                 "dynamic_trail": {
                     "active": False,
                     "activation_pct": TRAILING_ACTIVATION_PCT,
@@ -206,8 +167,7 @@ def open_position(symbol, side, limit_price):
                 "interval": "1h",  # will be overwritten if webhook provides
                 # available to accept bar_high/bar_low from webhook
                 "last_bar_high": limit_price,
-                "last_bar_low": limit_price,
-                "quantity": qty  # store quantity for locked pnl computations
+                "last_bar_low": limit_price
             }
 
     # send a minimal alert (this is allowed/expected) — filled / exit messages will be sent by notifier in formatted style
@@ -269,13 +229,11 @@ def wait_and_notify_filled_entry(symbol, side, order_id):
                 # fallback minimal message but still via notifier send function so formatting consistent
                 send_telegram_message(f"📩 Filled: {symbol} | {side} | {avg_price}")
 
-            # ensure trailing monitor is running (single monitor safeguard)
+            # ensure we mark monitor started but DO NOT spawn an extra per-trade thread here.
+            # The global trailing monitor thread will handle dynamic trailing for all trades.
             with trades_lock:
-                if not trades[symbol].get("trailing_monitor_started"):
-                    trades[symbol]["trailing_monitor_started"] = True
-                    # don't call log_trailing_start here with a string; the monitor will call it on activation with real pnl
-                    send_telegram_message(f"🛰️ Starting dynamic trailing monitor for {symbol}")
-                    threading.Thread(target=monitor_trailing_and_exit, args=(symbol, side), daemon=True).start()
+                trades[symbol]["trailing_monitor_started"] = True
+                send_telegram_message(f"🛰️ Dynamic trailing monitor marked for {symbol}")
 
             notified = True
 
@@ -358,6 +316,23 @@ def clean_residual_positions(symbol):
 # 🔧 Symbol tick & trailing helpers
 # ==============================
 
+def get_symbol_tick_size(symbol):
+    """Fetch the tick size for symbol precision."""
+    try:
+        url = f"{BASE_URL}/fapi/v1/exchangeInfo"
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        for s in data["symbols"]:
+            if s["symbol"] == symbol:
+                for f in s["filters"]:
+                    if f["filterType"] == "PRICE_FILTER":
+                        return float(f["tickSize"])
+    except Exception as e:
+        print(f"⚠️ Tick size fetch error for {symbol}: {e}")
+    return 0.0001
+
+
 def compute_ts_dynamic(entry_price, side, current_price,
                        activation_pct=TRAILING_ACTIVATION_PCT,
                        trail_pct=TRAILING_DISTANCE_PCT):
@@ -430,16 +405,16 @@ def compute_locked_pnl(entry_price, current_price, side, quantity=1.0):
 # --------- Dynamic trailing monitor ----------
 def monitor_trailing_and_exit(symbol, side):
     """
-    Monitor that calculates dynamic trailing stop and executes market exit when hit.
-    Calls log_trailing_start once (with real pnl%) and uses execute_market_exit() for closings.
+    Backwards-compatible per-trade monitor kept for compatibility (not started per-trade anymore).
+    The global monitor handles all trading trailing; this function is preserved for older flows.
     """
-    print(f"🛰️ Dynamic trailing monitor started for {symbol} (side: {side})")
+    print(f"🛰️ (legacy) Dynamic trailing monitor started for {symbol} (side: {side})")
+    # keep legacy behaviour if ever used directly
     start_time = time.time()
-    max_run = max(60, int(os.getenv("MAX_TRAILING_RUNTIME_MIN", "120"))) * 60  # safety cap
+    max_run = max(60, int(os.getenv("MAX_TRAILING_RUNTIME_MIN", "120"))) * 60
 
     while True:
         if time.time() - start_time > max_run:
-            print(f"⚠️ Trailing monitor max runtime reached for {symbol}. Stopping monitor.")
             with trades_lock:
                 if symbol in trades:
                     trades[symbol]["trailing_monitor_started"] = False
@@ -447,109 +422,187 @@ def monitor_trailing_and_exit(symbol, side):
 
         with trades_lock:
             if symbol not in trades or trades[symbol].get("closed"):
-                print(f"ℹ️ {symbol} trade closed or missing; stopping trailing.")
                 if symbol in trades:
                     trades[symbol]["trailing_monitor_started"] = False
                 return
             trade = trades[symbol]
             entry_price = float(trade.get("entry_price", 0))
             dyn = trade.setdefault("dynamic_trail", {})
-            interval = trade.get("interval", "1h")
 
         current_price = get_current_price(symbol)
         if current_price <= 0:
             time.sleep(1)
             continue
 
-        # Try to get accurate pnl from notifier helper
-        try:
-            pnl_percent = get_unrealized_pnl_pct(symbol) or 0.0
-        except Exception:
+        # Use compute_ts_dynamic to get candidate stop price
+        stop_candidate = compute_ts_dynamic(entry_price, side, current_price)
+        if stop_candidate is None:
+            time.sleep(max(1, TRAILING_UPDATE_INTERVAL))
+            continue
+
+        # Update stop_price if tighter (BUY: higher stop_candidate; SELL: lower stop_candidate)
+        with trades_lock:
+            prev = dyn.get("stop_price")
             if side.upper() == "BUY":
-                pnl_percent = ((current_price - entry_price) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
+                if prev is None or stop_candidate > prev:
+                    dyn["stop_price"] = stop_candidate
             else:
-                pnl_percent = ((entry_price - current_price) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
+                if prev is None or stop_candidate < prev:
+                    dyn["stop_price"] = stop_candidate
 
-        # Immediate stoploss
-        try:
-            immediate_threshold = -STOP_LOSS_PCT * LEVERAGE
-            if pnl_percent <= immediate_threshold and not trade.get("forced_exit", False):
-                with trades_lock:
-                    trades[symbol]["forced_exit"] = True
-                msg = f"🚨 Immediate Stoploss Triggered for {symbol} | PnL%: {round(pnl_percent,2)}"
-                try:
-                    log_trade_exit(symbol, current_price, reason="STOP_LOSS")
-                except Exception:
-                    send_telegram_message(msg)
-                execute_market_exit(symbol, side)
-                return
-        except Exception as e:
-            print("❌ Immediate stoploss check error:", e)
-
-        # Optional external loss checks
-        try:
-            check_loss_conditions(symbol, current_price=current_price)
-        except Exception as e:
-            print("⚠️ check_loss_conditions error:", e)
-
-        # Update peak/trough
-        if side.upper() == "BUY":
-            if current_price > dyn.get("peak", entry_price):
-                dyn["peak"] = current_price
-        else:
-            if current_price < dyn.get("trough", entry_price):
-                dyn["trough"] = current_price
-
-        # Trailing activation
-        activated = abs(pnl_percent) >= dyn.get("activation_pct", TRAILING_ACTIVATION_PCT)
-
-        if activated:
-            # Log trailing start once
-            if not dyn.get("notified", False):
-                try:
-                    log_trailing_start(symbol, round(pnl_percent, 2))
-                except Exception:
-                    send_telegram_message(f"🎯 <b>{symbol}</b> Trailing Started @ {round(pnl_percent,2)}%")
-                dyn["notified"] = True
-
-            # Compute dynamic trailing stop (fixed)
-            raw_stop = compute_ts_dynamic(entry_price, side, current_price)
-
-            if raw_stop is None:
-                time.sleep(1)
-                continue
-
-            # raw_stop is numeric stop price; apply tick rounding & hysteresis (minimal movement threshold)
-            tick = get_symbol_tick_size(symbol)
-            try:
-                new_stop = round_to_tick(raw_stop, symbol)
-            except Exception:
-                new_stop = round(raw_stop, 8)
-
-            prev_stop = dyn.get("stop_price")
-            hysteresis = max(tick * TRAILING_HYSTERESIS_TICKS, tick)
-
-            # If previous stop exists and change is less than hysteresis, skip update to avoid micro churn
-            if prev_stop is not None and abs(new_stop - prev_stop) < hysteresis:
-                # don't update; wait for a meaningful move
-                time.sleep(max(1, TRAILING_UPDATE_INTERVAL))
-                continue
-
-            dyn["stop_price"] = new_stop
-            dyn["locked_pnl_usd"] = compute_locked_pnl(entry_price, dyn["stop_price"], side, trade.get("quantity", 0))
-
-            # If stop hit
-            if side.upper() == "BUY" and current_price <= dyn["stop_price"]:
+            # Check exit
+            if side.upper() == "BUY" and current_price <= dyn.get("stop_price", 0):
                 send_telegram_message(f"🎯 <b>{symbol}</b> Dynamic trailing stop hit (BUY). Stop: {dyn['stop_price']} Current: {current_price}")
                 execute_market_exit(symbol, side)
                 return
-
-            if side.upper() == "SELL" and current_price >= dyn["stop_price"]:
+            if side.upper() == "SELL" and current_price >= dyn.get("stop_price", 999999999):
                 send_telegram_message(f"🎯 <b>{symbol}</b> Dynamic trailing stop hit (SELL). Stop: {dyn['stop_price']} Current: {current_price}")
                 execute_market_exit(symbol, side)
                 return
 
         time.sleep(max(1, TRAILING_UPDATE_INTERVAL))
+
+
+# --------- Global trailing monitor (single thread for all trades) ----------
+def global_trailing_monitor():
+    """
+    Continuously monitor all open trades and update trailing stops in a TradingView-like manner.
+    Uses TSI interpolation between low/high offsets to tighten the trail as profit increases.
+    """
+    print("🛰️ Global trailing monitor started")
+    while True:
+        try:
+            with trades_lock:
+                symbols = [s for s, t in trades.items() if not t.get("closed", True) and t.get("trailing_monitor_started", False)]
+            for symbol in symbols:
+                try:
+                    with trades_lock:
+                        trade = trades.get(symbol)
+                        if not trade or trade.get("closed", True):
+                            continue
+                        side = trade.get("side", "BUY").upper()
+                        entry_price = float(trade.get("entry_price", 0))
+                        dyn = trade.setdefault("dynamic_trail", {})
+                        qty = trade.get("quantity", 1.0)
+
+                    current_price = get_current_price(symbol)
+                    if current_price <= 0:
+                        continue
+
+                    # get live pnl% (prefer trade_notifier helper)
+                    try:
+                        pnl_percent = get_unrealized_pnl_pct(symbol) or 0.0
+                    except Exception:
+                        if side == "BUY":
+                            pnl_percent = ((current_price - entry_price) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
+                        else:
+                            pnl_percent = ((entry_price - current_price) / entry_price) * 100 * LEVERAGE if entry_price > 0 else 0.0
+
+                    # Immediate stoploss check (hard stop)
+                    try:
+                        immediate_threshold = -STOP_LOSS_PCT * LEVERAGE
+                        if pnl_percent <= immediate_threshold and not trade.get("forced_exit", False):
+                            with trades_lock:
+                                trades[symbol]["forced_exit"] = True
+                            msg = f"🚨 Immediate Stoploss Triggered for {symbol} | PnL%: {round(pnl_percent,2)}"
+                            try:
+                                log_trade_exit(symbol, current_price, reason="STOP_LOSS")
+                            except Exception:
+                                send_telegram_message(msg)
+                            execute_market_exit(symbol, side)
+                            continue
+                    except Exception as e:
+                        print("❌ Immediate stoploss check error:", e)
+
+                    # Optional: preserve earlier loss checks
+                    try:
+                        check_loss_conditions(symbol, current_price=current_price)
+                    except Exception:
+                        pass
+
+                    # Trailing activation check
+                    activated = abs(pnl_percent) >= dyn.get("activation_pct", TRAILING_ACTIVATION_PCT)
+
+                    # If not activated yet and activation met, mark and send message
+                    if not dyn.get("active", False) and activated:
+                        with trades_lock:
+                            dyn["active"] = True
+                            dyn["peak_pnl"] = pnl_percent
+                            dyn["trough_pnl"] = pnl_percent
+                            dyn["notified"] = dyn.get("notified", False)
+                        if not dyn.get("notified", False):
+                            try:
+                                log_trailing_start(symbol, round(pnl_percent, 2))
+                            except Exception:
+                                send_telegram_message(f"🎯 <b>{symbol}</b> Trailing Started @ {round(pnl_percent,2)}%")
+                            with trades_lock:
+                                dyn["notified"] = True
+
+                    # If trailing active, update peak/trough
+                    if dyn.get("active", False):
+                        with trades_lock:
+                            if side == "BUY":
+                                if pnl_percent > dyn.get("peak_pnl", -999):
+                                    dyn["peak_pnl"] = pnl_percent
+                            else:
+                                if pnl_percent < dyn.get("trough_pnl", 999):
+                                    dyn["trough_pnl"] = pnl_percent
+
+                        # compute adaptive offset (TSI interpolation)
+                        # clamp profit zone 0 - 10 for interpolation (same idea as TradingView linear map)
+                        profit_zone = min(max(abs(pnl_percent), 0.0), 10.0)
+                        dynamic_offset = (
+                            TSI_LOW_PROFIT_OFFSET_PCT +
+                            (TSI_HIGH_PROFIT_OFFSET_PCT - TSI_LOW_PROFIT_OFFSET_PCT) * (profit_zone / 10.0)
+                        )
+
+                        # compute candidate stop using compute_ts_dynamic (price-driven)
+                        stop_candidate = compute_ts_dynamic(entry_price, side, current_price,
+                                                            activation_pct=TRAILING_ACTIVATION_PCT,
+                                                            trail_pct=dynamic_offset if dynamic_offset > 0 else TRAILING_DISTANCE_PCT)
+
+                        if stop_candidate is None:
+                            continue
+
+                        # Update dyn.stop_price only if it's tighter (never loosen)
+                        with trades_lock:
+                            prev_stop = dyn.get("stop_price")
+                            if side == "BUY":
+                                # buy: stop should increase (tighten) as price moves up
+                                if prev_stop is None or stop_candidate > prev_stop:
+                                    dyn["stop_price"] = stop_candidate
+                            else:
+                                # sell: stop should decrease (tighten) as price moves down
+                                if prev_stop is None or stop_candidate < prev_stop:
+                                    dyn["stop_price"] = stop_candidate
+
+                            # store locked pnl calc for info
+                            dyn["locked_pnl_usd"] = compute_locked_pnl(entry_price, dyn["stop_price"], side, qty)
+
+                        # check exit condition: price hit the stop
+                        with trades_lock:
+                            sp = dyn.get("stop_price")
+                        if sp is None:
+                            continue
+
+                        if side == "BUY" and current_price <= sp:
+                            send_telegram_message(f"🎯 <b>{symbol}</b> Dynamic trailing stop hit (BUY). Stop: {sp} Current: {current_price}")
+                            execute_market_exit(symbol, side)
+                            # ensure we mark closed; wait_and_notify_filled_exit will finalize
+                            continue
+
+                        if side == "SELL" and current_price >= sp:
+                            send_telegram_message(f"🎯 <b>{symbol}</b> Dynamic trailing stop hit (SELL). Stop: {sp} Current: {current_price}")
+                            execute_market_exit(symbol, side)
+                            continue
+
+                except Exception as inner_e:
+                    print(f"⚠️ Error processing trailing for {symbol}: {inner_e}")
+        except Exception as e:
+            print(f"⚠️ Global trailing monitor error: {e}")
+
+        time.sleep(max(1, TRAILING_UPDATE_INTERVAL))
+
 
 # --------- Async exit + re-entry (force close then open) ----------
 def async_exit_and_open(symbol, new_side, entry_price):
@@ -668,6 +721,9 @@ def self_ping():
         time.sleep(5 * 60)
 
 threading.Thread(target=self_ping, daemon=True).start()
+
+# Start the global trailing monitor thread (single instance)
+threading.Thread(target=global_trailing_monitor, daemon=True).start()
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
