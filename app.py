@@ -275,23 +275,48 @@ def execute_market_exit(symbol, side):
     return resp
 
 def wait_and_notify_filled_exit(symbol, order_id):
+    """
+    Poll the Binance order until it's FILLED, then:
+      1) call log_trade_exit to send Telegram message (while trade still marked open)
+      2) mark the trade as closed in shared state
+      3) perform residual cleanup
+    This ordering ensures trade_notifier.log_trade_exit sees the trade and sends the exit message.
+    """
     while True:
         order_status = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
         if order_status.get("status") == "FILLED":
-            filled_price = float(order_status.get("avgPrice") or order_status.get("price") or 0)
-            # mark closed in shared dict and call notifier
+            # Prefer avgPrice, fall back to price
+            try:
+                filled_price = float(order_status.get("avgPrice") or order_status.get("price") or 0)
+            except Exception:
+                filled_price = 0.0
+
+            # 1) Try to call notifier BEFORE marking closed so log_trade_exit runs
+            try:
+                # If log_trade_exit fails for any reason, fall back to a minimal message
+                log_trade_exit(symbol, filled_price, reason="MARKET_CLOSE")
+            except Exception as e:
+                # fallback message (should rarely be needed since send_telegram_message works for entries)
+                print(f"⚠️ log_trade_exit failed for {symbol}: {e}")
+                send_telegram_message(f"💰 Closed {symbol} | Exit: {filled_price} (fallback notify)")
+
+            # 2) Now mark closed & update local trade state
             with trades_lock:
                 if symbol in trades:
                     trades[symbol]["exit_price"] = filled_price
                     trades[symbol]["closed"] = True
                     trades[symbol]["trailing_monitor_started"] = False
+
+            # 3) Clean any residual positions/orders on exchange
             try:
-                log_trade_exit(symbol, filled_price, reason="MARKET_CLOSE")
-            except Exception:
-                send_telegram_message(f"💰 Closed {symbol} | Exit: {filled_price}")
-            clean_residual_positions(symbol)
+                clean_residual_positions(symbol)
+            except Exception as e:
+                print(f"⚠️ Residual cleanup error for {symbol}: {e}")
+
             break
+        # not filled yet, wait a bit and poll again
         time.sleep(1)
+
 
 # --------- Clean residual positions ----------
 def clean_residual_positions(symbol):
