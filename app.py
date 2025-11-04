@@ -30,9 +30,7 @@ from config import (
 from trade_notifier import (
     log_trade_entry,
     log_trade_exit,
-    send_telegram_message,
     get_unrealized_pnl_pct,
-    close_trade_on_binance,
     trades as notifier_trades,
 )
 
@@ -177,7 +175,8 @@ def open_position(symbol, side, limit_price):
                 "last_bar_low": limit_price,
             }
 
-    send_telegram_message(f"📩 Alert: {symbol} | {side}_ENTRY | {limit_price}")
+    # NOTE: notifications are handled by trade_notifier, app.py will only log
+    print(f"📩 Alert (log): {symbol} | {side}_ENTRY | {limit_price}")
 
     resp = binance_signed_request("POST", "/fapi/v1/order", {
         "symbol": symbol,
@@ -192,7 +191,7 @@ def open_position(symbol, side, limit_price):
         order_id = resp["orderId"]
         threading.Thread(target=wait_and_notify_filled_entry, args=(symbol, side, order_id), daemon=True).start()
     else:
-        send_telegram_message(f"❌ Order create failed for {symbol}: {resp}")
+        print(f"❌ Order create failed for {symbol}: {resp}")
 
     return resp
 
@@ -225,9 +224,10 @@ def wait_and_notify_filled_entry(symbol, side, order_id):
                 trades[symbol]["order_id"] = order_id
 
             try:
+                # trade_notifier handles telegram notification
                 log_trade_entry(symbol, side, order_id, avg_price, trades[symbol].get("interval", "1h"))
             except Exception:
-                send_telegram_message(f"📩 Filled: {symbol} | {side} | {avg_price}")
+                print(f"📩 Filled (log): {symbol} | {side} | {avg_price}")
 
             notified = True
 
@@ -237,13 +237,13 @@ def wait_and_notify_filled_entry(symbol, side, order_id):
 
 
 # ---------------------------
-# Market exit flows
+# Market exit flows (reason-aware)
 # ---------------------------
-def execute_market_exit(symbol, side):
+def execute_market_exit(symbol, side, reason="MARKET_CLOSE"):
     # side = "BUY" means close BUY (long) -> send SELL market
     pos_data = binance_signed_request("GET", "/fapi/v2/positionRisk", {"symbol": symbol})
     if not pos_data or len(pos_data) == 0 or abs(float(pos_data[0].get("positionAmt", 0))) == 0:
-        send_telegram_message(f"⚠️ No active position for {symbol} to close.")
+        print(f"⚠️ No active position for {symbol} to close.")
         return {"status": "no_position"}
 
     qty = abs(float(pos_data[0]["positionAmt"]))
@@ -261,14 +261,14 @@ def execute_market_exit(symbol, side):
     })
 
     if "orderId" in resp:
-        threading.Thread(target=wait_and_notify_filled_exit, args=(symbol, resp["orderId"]), daemon=True).start()
+        threading.Thread(target=wait_and_notify_filled_exit, args=(symbol, resp["orderId"], reason), daemon=True).start()
     else:
-        send_telegram_message(f"❌ Market close failed for {symbol}: {resp}")
+        print(f"❌ Market close failed for {symbol}: {resp}")
 
     return resp
 
 
-def wait_and_notify_filled_exit(symbol, order_id):
+def wait_and_notify_filled_exit(symbol, order_id, reason="MARKET_CLOSE"):
     while True:
         order_status = binance_signed_request("GET", "/fapi/v1/order", {"symbol": symbol, "orderId": order_id})
         if order_status.get("status") == "FILLED":
@@ -278,10 +278,10 @@ def wait_and_notify_filled_exit(symbol, order_id):
                 filled_price = 0.0
 
             try:
-                log_trade_exit(symbol, filled_price, reason="MARKET_CLOSE")
+                # pass the reason to trade_notifier which will send the telegram message
+                log_trade_exit(symbol, filled_price, reason=reason)
             except Exception as e:
                 print(f"⚠️ log_trade_exit failed for {symbol}: {e}")
-                send_telegram_message(f"💰 Closed {symbol} | Exit: {filled_price} (fallback notify)")
 
             with trades_lock:
                 if symbol in trades:
@@ -339,6 +339,7 @@ def webhook():
             close_price = float(close_price)
         except Exception:
             close_price = 0.0
+        comment_raw = comment  # keep original raw comment text
         comment = comment.upper().strip()
 
         print(f"📩 Alert: {symbol} | {comment} | {close_price} | interval={interval}")
@@ -350,7 +351,8 @@ def webhook():
             if existing and not existing.get("closed", True):
                 # Close existing trade then open new BUY
                 def worker_replace():
-                    execute_market_exit(symbol, existing.get("side"))
+                    # pass MARKET_CLOSE as reason for forced replacement
+                    execute_market_exit(symbol, existing.get("side"), reason="SAME_DIRECTION_REENTRY")
                     time.sleep(OPPOSITE_CLOSE_DELAY)
                     open_position(symbol, "BUY", close_price)
                 threading.Thread(target=worker_replace, daemon=True).start()
@@ -368,7 +370,7 @@ def webhook():
             if existing and not existing.get("closed", True):
                 # Close existing trade then open new SELL
                 def worker_replace():
-                    execute_market_exit(symbol, existing.get("side"))
+                    execute_market_exit(symbol, existing.get("side"), reason="SAME_DIRECTION_REENTRY")
                     time.sleep(OPPOSITE_CLOSE_DELAY)
                     open_position(symbol, "SELL", close_price)
                 threading.Thread(target=worker_replace, daemon=True).start()
@@ -380,29 +382,28 @@ def webhook():
                 open_position(symbol, "SELL", close_price)
 
         # EXIT signals -> immediate market close (TradingView comment: EXIT_LONG / EXIT_SHORT)
-        elif comment == "EXIT_LONG":
-            # close BUY (long) positions
-            with trades_lock:
-                if symbol in trades and not trades[symbol].get("closed", True):
-                    send_telegram_message(f"📡 EXIT_LONG received for {symbol} — initiating market close.")
-                    threading.Thread(target=execute_market_exit, args=(symbol, "BUY"), daemon=True).start()
-                else:
-                    send_telegram_message(f"📡 EXIT_LONG received for {symbol} but no active BUY position found.")
+        elif comment.startswith("EXIT_LONG") or comment.startswith("EXIT_SHORT"):
+            # Determine reason from raw comment text (looking for 'trail' or 'loss')
+            cr = comment_raw.lower()
+            if "trail" in cr:
+                reason_key = "TRAIL_CLOSE"
+            elif "loss" in cr:
+                reason_key = "STOP_LOSS"
+            else:
+                reason_key = "MARKET_CLOSE"
 
-        elif comment == "EXIT_SHORT":
-            # close SELL (short) positions
             with trades_lock:
                 if symbol in trades and not trades[symbol].get("closed", True):
-                    send_telegram_message(f"📡 EXIT_SHORT received for {symbol} — initiating market close.")
-                    threading.Thread(target=execute_market_exit, args=(symbol, "SELL"), daemon=True).start()
+                    print(f"📡 {comment} received for {symbol} — initiating market close (reason={reason_key}).")
+                    threading.Thread(target=execute_market_exit, args=(symbol, trades[symbol].get("side"), reason_key), daemon=True).start()
                 else:
-                    send_telegram_message(f"📡 EXIT_SHORT received for {symbol} but no active SELL position found.")
+                    print(f"📡 {comment} received for {symbol} but no active position found.")
 
         # CROSS EXIT + reverse entry (close then open opposite)
         elif comment == "CROSS_EXIT_LONG":
             # Close BUY then open SELL
             def worker_cross_long():
-                execute_market_exit(symbol, "BUY")
+                execute_market_exit(symbol, "BUY", reason="CROSS_EXIT")
                 time.sleep(OPPOSITE_CLOSE_DELAY)
                 open_position(symbol, "SELL", close_price)
             threading.Thread(target=worker_cross_long, daemon=True).start()
@@ -410,7 +411,7 @@ def webhook():
         elif comment == "CROSS_EXIT_SHORT":
             # Close SELL then open BUY
             def worker_cross_short():
-                execute_market_exit(symbol, "SELL")
+                execute_market_exit(symbol, "SELL", reason="CROSS_EXIT")
                 time.sleep(OPPOSITE_CLOSE_DELAY)
                 open_position(symbol, "BUY", close_price)
             threading.Thread(target=worker_cross_short, daemon=True).start()
