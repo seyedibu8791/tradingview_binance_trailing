@@ -1,6 +1,4 @@
-# ================================
-# trade_notifier.py (AUTO-TRAIL SYNC))
-# ================================
+# trade_notifier.py (AUTO-TRAIL SYNC) - trailing removed
 import requests
 import threading
 import time
@@ -21,8 +19,6 @@ from config import (
     DEBUG,
     LEVERAGE,
     TRADE_AMOUNT,
-    TRAILING_ACTIVATION_PCT,
-    TRAILING_DISTANCE_PCT,
 )
 
 # =======================
@@ -158,7 +154,7 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, 
         "pnl_percent": 0.0,
         "entry_time": time.time(),
         "interval": interval.lower(),
-        "trail_active": False,
+        "trail_active": False,  # kept for compatibility but not used
     }
 
     direction_emoji = "🟩⬆️" if side.upper() == "BUY" else "🟥⬇️"
@@ -168,7 +164,7 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, 
         f"┇Entry: {filled_price}\n"
         f"┇Interval: {interval}\n"
         f"┇Leverage: {LEVERAGE}x | Amount: ${TRADE_AMOUNT}\n"
-        f"┇<i>Dynamic Trailing Active — Backend Monitored</i>"
+        f"┇<i>Backend Monitored</i>"
     )
     send_telegram_message(msg)
 
@@ -179,6 +175,33 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, 
 def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
     t = trades.get(symbol)
     if not t or t.get("closed"):
+        # still send a notification even if trade not tracked locally
+        # attempt to build a minimal msg using available info
+        try:
+            live_pct = get_unrealized_pnl_pct(symbol)
+            pnl_percent = live_pct if live_pct is not None else 0.0
+            pnl_value = (pnl_percent / 100.0) * TRADE_AMOUNT
+            emoji = "💰✅" if pnl_percent > 0 else "💔⛔️" if pnl_percent < 0 else "⚪️"
+            reason_text = {
+                "STOP_LOSS": "🚨 Stoploss Triggered",
+                "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
+                "FORCE_CLOSE": "⚠️ Forced 2-Bar Exit",
+                "MARKET_CLOSE": "✅ Manual Market Close",
+                "SAME_DIRECTION_REENTRY": "🔁 Re-entry Close",
+                "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Close",
+                "NORMAL": "✅ Normal Close",
+            }.get(reason, reason)
+            msg = (
+                f"{emoji} <b>{reason_text}</b>\n"
+                f"┇#{symbol}\n"
+                f"┇Exit: {filled_price}\n"
+                f"┇PnL: <b>{round(pnl_value,2)}$</b> | {round(pnl_percent,2)}%\n"
+                f"┇Reason: <i>{reason}</i>"
+            )
+            send_telegram_message(msg)
+        except Exception:
+            if DEBUG:
+                print("⚠️ log_trade_exit called but no local trade data available.")
         return
 
     t["closed"] = True
@@ -208,29 +231,6 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
         f"┇{t['side']} | Entry: {t['entry_price']} → Exit: {filled_price}\n"
         f"┇PnL: <b>{t['pnl']}$</b> | {t['pnl_percent']}%\n"
         f"┇Reason: <i>{reason}</i>"
-    )
-    send_telegram_message(msg)
-
-
-# =======================
-# 🎯 TRAILING LOGS
-# =======================
-def log_trailing_start(symbol: str, activation_price: float, trail_distance: float):
-    msg = (
-        f"🎯 <b>{symbol}</b> Trailing Activated\n"
-        f"┇Start: {activation_price}\n"
-        f"┇Trail Distance: {trail_distance}\n"
-        f"┇<i>Backend now dynamically adjusts stop.</i>"
-    )
-    send_telegram_message(msg)
-
-
-def log_trailing_update(symbol: str, new_stop: float, current_price: float):
-    msg = (
-        f"🧩 <b>{symbol}</b> Trailing Update\n"
-        f"┇New Stop: {new_stop}\n"
-        f"┇Price: {current_price}\n"
-        f"┇<i>Backend following TradingView-style trail</i>"
     )
     send_telegram_message(msg)
 
