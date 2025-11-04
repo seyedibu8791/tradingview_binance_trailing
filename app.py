@@ -179,11 +179,11 @@ def start_loss_bar_monitor(symbol):
     """
     Monitors live PnL for each bar interval (from trades[symbol]['interval'])
     and closes the trade if there are LOSS_BARS_LIMIT consecutive negative bars.
-    Telegram message will be handled via trade_notifier.log_trade_exit().
+    Telegram message is sent via trade_notifier.
     """
     def monitor():
-        from trade_notifier import log_trade_exit  # ✅ import inside thread to avoid circular import
-
+        from trade_notifier import notify_exit  # ✅ import inside thread to avoid circular import
+        
         with trades_lock:
             t = trades.get(symbol)
             if not t:
@@ -196,7 +196,6 @@ def start_loss_bar_monitor(symbol):
 
         loss_bars = 0
         while True:
-            # wait for one full bar duration before next check
             time.sleep(bar_sec)
 
             with trades_lock:
@@ -219,7 +218,7 @@ def start_loss_bar_monitor(symbol):
                     print(f"⚠️ {symbol}: get_live_pnl_for_monitor returned None; skipping this bar.")
                 continue
 
-            # Log every bar’s PnL
+            # Log each bar's PnL
             print(f"📊 {symbol}: Live PnL = {pnl_pct:.2f}% | Loss Bars = {loss_bars}/{LOSS_BARS_LIMIT}")
 
             # Count loss bars
@@ -240,8 +239,14 @@ def start_loss_bar_monitor(symbol):
                 try:
                     exit_price = execute_market_exit(symbol, side, reason="TWO_BAR_CLOSE_EXIT")
 
-                    # ✅ Use trade_notifier to handle Telegram + trade log
-                    log_trade_exit(symbol, exit_price, reason="TWO_BAR_CLOSE_EXIT")
+                    # ✅ Notify via trade_notifier only
+                    notify_exit(
+                        symbol=symbol,
+                        side=side,
+                        reason="TWO_BAR_CLOSE_EXIT",
+                        exit_price=exit_price,
+                        extra_info=f"{LOSS_BARS_LIMIT} consecutive negative bars detected"
+                    )
 
                 except Exception as e:
                     print(f"❌ Failed to execute TWO_BAR_CLOSE_EXIT for {symbol}: {e}")
