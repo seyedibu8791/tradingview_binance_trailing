@@ -31,7 +31,6 @@ from config import (
 from trade_notifier import (
     log_trade_entry,
     log_trade_exit,
-    get_unrealized_pnl_pct,
     trades as notifier_trades,
 )
 
