@@ -1,4 +1,4 @@
-# config.py - trailing/TSI parameters removedd
+# config.py - trailing removed, real trade fetch + accurate PnL
 import os
 import time
 import hmac
@@ -63,7 +63,7 @@ LOG_FILE = os.getenv("LOG_FILE", "trades.log")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # =============================
-#  FUNCTION: GET UNREALIZED PNL
+#  BINANCE SIGNED REQUEST HELPERS
 # =============================
 def _signed_get(path: str, params: dict = None, timeout: int = 10):
     if params is None:
@@ -77,6 +77,10 @@ def _signed_get(path: str, params: dict = None, timeout: int = 10):
     r.raise_for_status()
     return r.json()
 
+
+# =============================
+#  FUNCTION: GET UNREALIZED PNL %
+# =============================
 def get_unrealized_pnl_pct(symbol: str):
     try:
         data = _signed_get("/fapi/v2/positionRisk")
@@ -95,6 +99,72 @@ def get_unrealized_pnl_pct(symbol: str):
         if DEBUG:
             print("⚠️ get_unrealized_pnl_pct error:", e)
         return None
+
+
+# =============================
+#  FUNCTION: GET LAST FILLS (REAL EXECUTIONS)
+# =============================
+def get_latest_fills(symbol: str, limit: int = 10):
+    """Fetch recent user trades for the symbol."""
+    try:
+        trades = _signed_get("/fapi/v1/userTrades", {"symbol": symbol.upper(), "limit": limit})
+        if not trades:
+            return []
+        return trades
+    except Exception as e:
+        if DEBUG:
+            print(f"⚠️ get_latest_fills error for {symbol}: {e}")
+        return []
+
+
+def compute_real_pnl(symbol: str):
+    """
+    Compute actual realized PnL from Binance fills.
+    Returns dict with entry_price, exit_price, pnl_usd, pnl_pct
+    """
+    try:
+        fills = get_latest_fills(symbol)
+        if not fills:
+            return None
+
+        # Split buy/sell trades
+        buys = [f for f in fills if f.get("side") == "BUY"]
+        sells = [f for f in fills if f.get("side") == "SELL"]
+
+        if not buys or not sells:
+            return None
+
+        total_buy_qty = sum(float(f["qty"]) for f in buys)
+        total_sell_qty = sum(float(f["qty"]) for f in sells)
+        avg_buy_price = sum(float(f["price"]) * float(f["qty"]) for f in buys) / total_buy_qty
+        avg_sell_price = sum(float(f["price"]) * float(f["qty"]) for f in sells) / total_sell_qty
+
+        # Use smaller of two sides for matched quantity
+        qty = min(total_buy_qty, total_sell_qty)
+        direction = "LONG" if total_buy_qty > total_sell_qty else "SHORT"
+
+        # Calculate PnL
+        if direction == "LONG":
+            pnl_usd = (avg_sell_price - avg_buy_price) * qty
+            pnl_pct = ((avg_sell_price - avg_buy_price) / avg_buy_price) * 100 * LEVERAGE
+        else:
+            pnl_usd = (avg_buy_price - avg_sell_price) * qty
+            pnl_pct = ((avg_buy_price - avg_sell_price) / avg_sell_price) * 100 * LEVERAGE
+
+        return {
+            "symbol": symbol.upper(),
+            "entry_price": round(avg_buy_price if direction == "LONG" else avg_sell_price, 4),
+            "exit_price": round(avg_sell_price if direction == "LONG" else avg_buy_price, 4),
+            "pnl_usd": round(pnl_usd, 2),
+            "pnl_pct": round(pnl_pct, 2),
+            "qty": round(qty, 4),
+            "direction": direction,
+        }
+    except Exception as e:
+        if DEBUG:
+            print(f"⚠️ compute_real_pnl error for {symbol}: {e}")
+        return None
+
 
 # =============================
 #  LOG CONFIGURATION DETAILS
