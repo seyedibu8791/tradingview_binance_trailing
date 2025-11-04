@@ -1,4 +1,3 @@
-# trade_notifier.py (updated with 2-bar continuous negative PnL exit)
 import requests
 import threading
 import time
@@ -192,17 +191,18 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "MARKET_CLOSE
         )
         pnl_percent = (pnl_dollar / TRADE_AMOUNT) * 100
 
-        emoji = "💰✅" if pnl_dollar > 0 else "💔⛔️" if pnl_dollar < 0 else "⚪️"
+        reason_text = {
+            "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
+            "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Exit",
+            "SAME_DIRECTION_REENTRY": "🔁 Same Direction Signal Exit",
+            "CROSS_EXIT": "⚔️ Cross Exit",
+            "STOP_LOSS": "🚨 Stop Loss Hit",
+            "MARKET_CLOSE": "✅ Market Close",
+            "TWO_BAR_CLOSE_EXIT": "⏱️ 2 Bar Close Exit",
+            "LOSS_BAR_EXIT": "⏱️ 2 Bar Close Exit",
+        }.get(reason, reason)
 
-reason_text = {
-    "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
-    "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Exit",
-    "SAME_DIRECTION_REENTRY": "🔁 Same Direction Signal Exit",
-    "CROSS_EXIT": "⚔️ Cross Exit",
-    "STOP_LOSS": "🚨 Stop Loss Hit",
-    "MARKET_CLOSE": "✅ Market Close",
-    "TWO_BAR_CLOSE_EXIT": "⏱️ 2 Bar Close Exit",   # ✅ unified key
-}.get(reason, reason)
+        emoji = "💰✅" if pnl_dollar > 0 else "💔⛔️" if pnl_dollar < 0 else "⚪️"
 
         msg = (
             f"{emoji} <b>{reason_text}</b>\n"
@@ -228,6 +228,32 @@ reason_text = {
 
 
 # =======================
+# 🆕 NOTIFY EXIT (used by app.py monitor)
+# =======================
+def notify_exit(symbol, side, reason, exit_price, extra_info=None):
+    """
+    Sends a clean Telegram notification for exits triggered externally (like 2-bar loss rule).
+    """
+    try:
+        reason_text = {
+            "TWO_BAR_CLOSE_EXIT": "⏱️ 2 Bar Close Exit",
+            "LOSS_BAR_EXIT": "⏱️ 2 Bar Close Exit",
+            "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
+            "STOP_LOSS": "🚨 Stop Loss Hit",
+        }.get(reason, reason)
+
+        msg = (
+            f"💔⛔️ <b>{reason_text}</b>\n"
+            f"┇#{symbol}\n"
+            f"┇{side} closed at {exit_price}\n"
+            f"┇Reason: <i>{extra_info or reason_text}</i>"
+        )
+        send_telegram_message(msg)
+    except Exception as e:
+        print(f"❌ notify_exit error: {e}")
+
+
+# =======================
 # 🕒 INTERVAL PARSER
 # =======================
 def parse_interval_to_seconds(interval: str) -> int:
@@ -245,7 +271,7 @@ def parse_interval_to_seconds(interval: str) -> int:
 
 
 # =======================
-# 🔁 MONITOR NEGATIVE PNL
+# 🔁 MONITOR NEGATIVE PNL (legacy, optional)
 # =======================
 def monitor_negative_pnl(symbol: str):
     """Check PnL for open trade every bar; close if negative for LOSS_BARS_LIMIT bars."""
