@@ -194,15 +194,15 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "MARKET_CLOSE
 
         emoji = "💰✅" if pnl_dollar > 0 else "💔⛔️" if pnl_dollar < 0 else "⚪️"
 
-        reason_text = {
-            "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
-            "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Exit",
-            "SAME_DIRECTION_REENTRY": "🔁 Same Direction Signal Exit",
-            "CROSS_EXIT": "⚔️ Cross Exit",
-            "STOP_LOSS": "🚨 Stop Loss Hit",
-            "MARKET_CLOSE": "✅ Market Close",
-            "LOSS_BAR_EXIT": "2️⃣ 2 Bar Close Exit",
-        }.get(reason, reason)
+reason_text = {
+    "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
+    "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Exit",
+    "SAME_DIRECTION_REENTRY": "🔁 Same Direction Signal Exit",
+    "CROSS_EXIT": "⚔️ Cross Exit",
+    "STOP_LOSS": "🚨 Stop Loss Hit",
+    "MARKET_CLOSE": "✅ Market Close",
+    "TWO_BAR_CLOSE_EXIT": "⏱️ 2 Bar Close Exit",   # ✅ unified key
+}.get(reason, reason)
 
         msg = (
             f"{emoji} <b>{reason_text}</b>\n"
