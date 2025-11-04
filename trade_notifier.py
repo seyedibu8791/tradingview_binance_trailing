@@ -1,3 +1,4 @@
+# trade_notifier.py
 import requests
 import threading
 import time
@@ -72,7 +73,10 @@ def _signed_post(path: str, params: dict):
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     resp = requests.post(url, headers=headers, timeout=10)
     if DEBUG:
-        print("🧾 POST:", path, resp.text)
+        try:
+            print("🧾 POST:", path, resp.text)
+        except Exception:
+            pass
     return resp.json()
 
 
@@ -99,8 +103,8 @@ def get_last_trade_prices(symbol: str):
     """Fetch last executed buy/sell trade prices from Binance."""
     try:
         data = _signed_get("/fapi/v1/userTrades", {"symbol": symbol.upper(), "limit": 50})
-        buys = [float(x["price"]) for x in data if x["isBuyer"]]
-        sells = [float(x["price"]) for x in data if not x["isBuyer"]]
+        buys = [float(x["price"]) for x in data if x.get("isBuyer")]
+        sells = [float(x["price"]) for x in data if not x.get("isBuyer")]
         entry = round(sum(buys) / len(buys), 4) if buys else 0.0
         exit = round(sum(sells) / len(sells), 4) if sells else 0.0
         return entry, exit
@@ -155,9 +159,7 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, 
         "interval": interval.lower(),
     }
 
-    # Start monitoring negative PnL after entry
-    threading.Thread(target=monitor_negative_pnl, args=(symbol,), daemon=True).start()
-
+    # NOTE: monitoring will be started by app.py (start_loss_bar_monitor) to avoid duplicate monitors.
     direction_emoji = "🟩⬆️" if side.upper() == "BUY" else "🟥⬇️"
     msg = (
         f"{direction_emoji} <b>{side.upper()} ENTRY</b>\n"
@@ -191,6 +193,8 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "MARKET_CLOSE
         )
         pnl_percent = (pnl_dollar / TRADE_AMOUNT) * 100
 
+        emoji = "💰✅" if pnl_dollar > 0 else "💔⛔️" if pnl_dollar < 0 else "⚪️"
+
         reason_text = {
             "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
             "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Exit",
@@ -199,10 +203,7 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "MARKET_CLOSE
             "STOP_LOSS": "🚨 Stop Loss Hit",
             "MARKET_CLOSE": "✅ Market Close",
             "TWO_BAR_CLOSE_EXIT": "⏱️ 2 Bar Close Exit",
-            "LOSS_BAR_EXIT": "⏱️ 2 Bar Close Exit",
         }.get(reason, reason)
-
-        emoji = "💰✅" if pnl_dollar > 0 else "💔⛔️" if pnl_dollar < 0 else "⚪️"
 
         msg = (
             f"{emoji} <b>{reason_text}</b>\n"
@@ -228,29 +229,52 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "MARKET_CLOSE
 
 
 # =======================
-# 🆕 NOTIFY EXIT (used by app.py monitor)
+# ✅ NOTIFY EXIT (called by app.py monitor after initiating market close)
 # =======================
-def notify_exit(symbol, side, reason, exit_price, extra_info=None):
+def notify_exit(symbol: str, side: str, reason: str = "MARKET_CLOSE", exit_price=None, extra_info: str = None):
     """
-    Sends a clean Telegram notification for exits triggered externally (like 2-bar loss rule).
+    Called when app.py initiated a market close (execute_market_exit).
+    - Sends an immediate telegram message that a close was requested (so user sees immediate feedback).
+    - Final filled exit message will be posted by log_trade_exit once Binance reports the fill.
+    exit_price can be the response from execute_market_exit (likely a dict) or a numeric price.
     """
     try:
+        # If exit_price is a dict, attempt to extract any helpful fields for message; otherwise just show placeholder.
+        exit_info = ""
+        price_display = ""
+        try:
+            if isinstance(exit_price, dict):
+                # If orderId present, show that
+                if "orderId" in exit_price:
+                    exit_info = f" (close orderId={exit_price.get('orderId')})"
+                if "avgPrice" in exit_price:
+                    price_display = f"ExitPriceApprox: {exit_price.get('avgPrice')}"
+            elif isinstance(exit_price, (int, float, str)):
+                price_display = f"ExitPrice: {exit_price}"
+        except Exception:
+            price_display = ""
+
         reason_text = {
-            "TWO_BAR_CLOSE_EXIT": "⏱️ 2 Bar Close Exit",
-            "LOSS_BAR_EXIT": "⏱️ 2 Bar Close Exit",
             "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
+            "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Exit",
+            "SAME_DIRECTION_REENTRY": "🔁 Same Direction Signal Exit",
+            "CROSS_EXIT": "⚔️ Cross Exit",
             "STOP_LOSS": "🚨 Stop Loss Hit",
+            "MARKET_CLOSE": "✅ Market Close",
+            "TWO_BAR_CLOSE_EXIT": "⏱️ 2 Bar Close Exit",
         }.get(reason, reason)
 
+        extra = f"\n┇Info: {extra_info}" if extra_info else ""
         msg = (
-            f"💔⛔️ <b>{reason_text}</b>\n"
+            f"⚠️ <b>Close Requested</b>\n"
             f"┇#{symbol}\n"
-            f"┇{side} closed at {exit_price}\n"
-            f"┇Reason: <i>{extra_info or reason_text}</i>"
+            f"┇Side: {side} | Reason: {reason_text}\n"
+            f"┇{price_display}{exit_info}{extra}"
         )
         send_telegram_message(msg)
     except Exception as e:
-        print(f"❌ notify_exit error: {e}")
+        if DEBUG:
+            print("⚠️ notify_exit error:", e)
 
 
 # =======================
@@ -258,20 +282,22 @@ def notify_exit(symbol, side, reason, exit_price, extra_info=None):
 # =======================
 def parse_interval_to_seconds(interval: str) -> int:
     """Convert TradingView interval (like '1m', '5m', '1h') into seconds."""
-    unit = interval[-1]
-    value = int(interval[:-1])
-    if unit == "m":
-        return value * 60
-    elif unit == "h":
-        return value * 3600
-    elif unit == "d":
-        return value * 86400
-    else:
-        return 300  # default 5 min
+    try:
+        unit = interval[-1]
+        value = int(interval[:-1])
+        if unit == "m":
+            return value * 60
+        elif unit == "h":
+            return value * 3600
+        elif unit == "d":
+            return value * 86400
+    except Exception:
+        pass
+    return 300  # default 5 min
 
 
 # =======================
-# 🔁 MONITOR NEGATIVE PNL (legacy, optional)
+# 🔁 MONITOR NEGATIVE PNL (kept for compatibility but not auto-started here)
 # =======================
 def monitor_negative_pnl(symbol: str):
     """Check PnL for open trade every bar; close if negative for LOSS_BARS_LIMIT bars."""
@@ -282,13 +308,17 @@ def monitor_negative_pnl(symbol: str):
             pnl = get_unrealized_pnl_pct(symbol)
 
             if pnl is not None:
+                # Log each bar's pnl (for visibility)
+                if DEBUG:
+                    print(f"monitor_negative_pnl: {symbol} live pnl% = {pnl}")
+
                 if pnl < 0:
                     pnl_neg_counter[symbol] = pnl_neg_counter.get(symbol, 0) + 1
                     if pnl_neg_counter[symbol] >= LOSS_BARS_LIMIT:
                         t = trades[symbol]
                         close_trade_on_binance(symbol, t["side"])
-                        log_trade_exit(symbol, t["entry_price"], reason="LOSS_BAR_EXIT")
-                        send_telegram_message(f"⚠️ 2 bar close exit triggered for {symbol}")
+                        log_trade_exit(symbol, t["entry_price"], reason="TWO_BAR_CLOSE_EXIT")
+                        send_telegram_message(f"⚠️ {LOSS_BARS_LIMIT}-bar close exit triggered for {symbol}")
                         break
                 else:
                     pnl_neg_counter[symbol] = 0
