@@ -1,4 +1,4 @@
-# trade_notifier.py (AUTO-TRAIL SYNC) - trailing removed
+# trade_notifier.py (FINAL - Real PnL + Exit Reason Integrated)
 import requests
 import threading
 import time
@@ -90,25 +90,22 @@ def get_position_info(symbol: str) -> Optional[dict]:
         return None
 
 
-def get_unrealized_pnl_pct(symbol: str) -> Optional[float]:
+# =======================
+# 💰 REAL TRADE PRICE FETCHER
+# =======================
+def get_last_trade_prices(symbol: str):
+    """Fetch last executed buy/sell trade prices from Binance."""
     try:
-        p = get_position_info(symbol)
-        if not p:
-            return None
-        entry_price = float(p.get("entryPrice", 0) or 0)
-        mark_price = float(p.get("markPrice", 0) or 0)
-        pos_amt = float(p.get("positionAmt", 0))
-        if entry_price == 0 or abs(pos_amt) == 0 or mark_price == 0:
-            return None
-        if pos_amt > 0:
-            pct = ((mark_price - entry_price) / entry_price) * 100 * LEVERAGE
-        else:
-            pct = ((entry_price - mark_price) / entry_price) * 100 * LEVERAGE
-        return round(pct, 2)
+        data = _signed_get("/fapi/v1/userTrades", {"symbol": symbol.upper(), "limit": 50})
+        buys = [float(x["price"]) for x in data if x["isBuyer"]]
+        sells = [float(x["price"]) for x in data if not x["isBuyer"]]
+        entry = round(sum(buys) / len(buys), 4) if buys else 0.0
+        exit = round(sum(sells) / len(sells), 4) if sells else 0.0
+        return entry, exit
     except Exception as e:
         if DEBUG:
-            print("⚠️ get_unrealized_pnl_pct error:", e)
-        return None
+            print("⚠️ get_last_trade_prices error:", e)
+        return 0.0, 0.0
 
 
 # =======================
@@ -154,7 +151,6 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, 
         "pnl_percent": 0.0,
         "entry_time": time.time(),
         "interval": interval.lower(),
-        "trail_active": False,  # kept for compatibility but not used
     }
 
     direction_emoji = "🟩⬆️" if side.upper() == "BUY" else "🟥⬇️"
@@ -172,67 +168,56 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, 
 # =======================
 # 🟥 TRADE EXIT
 # =======================
-def log_trade_exit(symbol: str, filled_price: float, reason: str = "NORMAL"):
-    t = trades.get(symbol)
-    if not t or t.get("closed"):
-        # still send a notification even if trade not tracked locally
-        # attempt to build a minimal msg using available info
-        try:
-            live_pct = get_unrealized_pnl_pct(symbol)
-            pnl_percent = live_pct if live_pct is not None else 0.0
-            pnl_value = (pnl_percent / 100.0) * TRADE_AMOUNT
-            emoji = "💰✅" if pnl_percent > 0 else "💔⛔️" if pnl_percent < 0 else "⚪️"
-            reason_text = {
-                "STOP_LOSS": "🚨 Stoploss Triggered",
-                "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
-                "FORCE_CLOSE": "⚠️ Forced 2-Bar Exit",
-                "MARKET_CLOSE": "✅ Manual Market Close",
-                "SAME_DIRECTION_REENTRY": "🔁 Re-entry Close",
-                "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Close",
-                "NORMAL": "✅ Normal Close",
-            }.get(reason, reason)
-            msg = (
-                f"{emoji} <b>{reason_text}</b>\n"
-                f"┇#{symbol}\n"
-                f"┇Exit: {filled_price}\n"
-                f"┇PnL: <b>{round(pnl_value,2)}$</b> | {round(pnl_percent,2)}%\n"
-                f"┇Reason: <i>{reason}</i>"
-            )
-            send_telegram_message(msg)
-        except Exception:
-            if DEBUG:
-                print("⚠️ log_trade_exit called but no local trade data available.")
-        return
+def log_trade_exit(symbol: str, filled_price: float, reason: str = "MARKET_CLOSE"):
+    try:
+        entry_price, exit_price = get_last_trade_prices(symbol)
+        if not exit_price:
+            exit_price = filled_price
 
-    t["closed"] = True
-    t["exit_price"] = filled_price
+        t = trades.get(symbol, {})
+        side = t.get("side", "BUY")
+        entry_price = entry_price or t.get("entry_price", filled_price)
+        exit_price = exit_price or filled_price
 
-    live_pct = get_unrealized_pnl_pct(symbol)
-    pnl_percent = live_pct if live_pct is not None else t.get("pnl_percent", 0.0)
-    pnl_value = (pnl_percent / 100.0) * TRADE_AMOUNT
+        pnl_dollar = (
+            (exit_price - entry_price) / entry_price * TRADE_AMOUNT * LEVERAGE
+            if side == "BUY"
+            else (entry_price - exit_price) / entry_price * TRADE_AMOUNT * LEVERAGE
+        )
+        pnl_percent = (pnl_dollar / TRADE_AMOUNT) * 100
 
-    t["pnl"] = round(pnl_value, 2)
-    t["pnl_percent"] = round(pnl_percent or 0.0, 2)
+        emoji = "💰✅" if pnl_dollar > 0 else "💔⛔️" if pnl_dollar < 0 else "⚪️"
 
-    emoji = "💰✅" if t["pnl_percent"] > 0 else "💔⛔️" if t["pnl_percent"] < 0 else "⚪️"
-    reason_text = {
-        "STOP_LOSS": "🚨 Stoploss Triggered",
-        "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
-        "FORCE_CLOSE": "⚠️ Forced 2-Bar Exit",
-        "MARKET_CLOSE": "✅ Manual Market Close",
-        "SAME_DIRECTION_REENTRY": "🔁 Re-entry Close",
-        "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Close",
-        "NORMAL": "✅ Normal Close",
-    }.get(reason, reason)
+        reason_text = {
+            "TRAIL_CLOSE": "🎯 Trailing Stop Hit",
+            "OPPOSITE_SIGNAL_CLOSE": "🔄 Opposite Signal Exit",
+            "SAME_DIRECTION_REENTRY": "🔁 Same Direction Signal Exit",
+            "CROSS_EXIT": "⚔️ Cross Exit",
+            "STOP_LOSS": "🚨 Stop Loss Hit",
+            "MARKET_CLOSE": "✅ Market Close",
+        }.get(reason, reason)
 
-    msg = (
-        f"{emoji} <b>{reason_text}</b>\n"
-        f"┇#{symbol}\n"
-        f"┇{t['side']} | Entry: {t['entry_price']} → Exit: {filled_price}\n"
-        f"┇PnL: <b>{t['pnl']}$</b> | {t['pnl_percent']}%\n"
-        f"┇Reason: <i>{reason}</i>"
-    )
-    send_telegram_message(msg)
+        msg = (
+            f"{emoji} <b>{reason_text}</b>\n"
+            f"┇#{symbol}\n"
+            f"┇{side} | Entry: {entry_price} → Exit: {exit_price}\n"
+            f"┇PnL: <b>{round(pnl_dollar, 2)}$</b> | {round(pnl_percent, 2)}%\n"
+            f"┇Reason: <i>{reason_text}</i>"
+        )
+
+        t.update({
+            "exit_price": exit_price,
+            "pnl": round(pnl_dollar, 2),
+            "pnl_percent": round(pnl_percent, 2),
+            "closed": True,
+        })
+        trades[symbol] = t
+
+        send_telegram_message(msg)
+
+    except Exception as e:
+        print("❌ log_trade_exit error:", e)
+        send_telegram_message(f"⚠️ Error logging trade exit for {symbol}: {e}")
 
 
 # =======================
@@ -266,6 +251,8 @@ def send_daily_summary():
             f"✅ Net PnL %: {net_pnl}%"
         )
         send_telegram_message(msg)
+
+        # cleanup closed trades
         for s in list(trades.keys()):
             if trades[s].get("closed"):
                 trades.pop(s, None)
