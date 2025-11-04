@@ -1,4 +1,4 @@
-# config.py - trailing removed, real trade fetch + accurate PnL
+# config.py 
 import os
 import time
 import hmac
@@ -98,6 +98,28 @@ def get_unrealized_pnl_pct(symbol: str):
     except Exception as e:
         if DEBUG:
             print("⚠️ get_unrealized_pnl_pct error:", e)
+        return None
+
+
+# =============================
+#  Wrapper: GET LIVE PNL FOR MONITOR
+#  (safe, predictable helper for the 2-bar monitor)
+# =============================
+def get_live_pnl_for_monitor(symbol: str):
+    """
+    Lightweight wrapper used by the 2-bar loss monitor.
+    Returns current unrealized PnL % as a rounded float (positive or negative),
+    or None if there is no active position / error.
+    This calls the existing get_unrealized_pnl_pct() so other code remains unchanged.
+    """
+    try:
+        pnl = get_unrealized_pnl_pct(symbol)
+        if pnl is None:
+            return None
+        return round(float(pnl), 4)
+    except Exception as e:
+        if DEBUG:
+            print(f"⚠️ get_live_pnl_for_monitor error for {symbol}: {e}")
         return None
 
 
