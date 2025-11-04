@@ -172,14 +172,14 @@ def interval_to_seconds(interval_str: str) -> int:
         pass
     return 900
 
-
 # ---------------------------
 # Background monitor: 2-bar continuous negative PnL
 # ---------------------------
 def start_loss_bar_monitor(symbol):
     """
-    Start a daemon thread that checks live PnL every bar interval (from trades[symbol]['interval'])
+    Monitors live PnL for each bar interval (from trades[symbol]['interval'])
     and closes the trade if there are LOSS_BARS_LIMIT consecutive negative bars.
+    Telegram message will be handled via trade_notifier.
     """
     def monitor():
         with trades_lock:
@@ -194,7 +194,6 @@ def start_loss_bar_monitor(symbol):
 
         loss_bars = 0
         while True:
-            # sleep for one bar duration
             time.sleep(bar_sec)
 
             with trades_lock:
@@ -203,7 +202,6 @@ def start_loss_bar_monitor(symbol):
                     if DEBUG:
                         print(f"🔒 Monitor stopped for {symbol}: no trade or closed.")
                     break
-                # refresh side (in case it changed)
                 side = t.get("side", side)
 
             try:
@@ -213,30 +211,38 @@ def start_loss_bar_monitor(symbol):
                 if DEBUG:
                     print(f"⚠️ Error calling get_live_pnl_for_monitor for {symbol}: {e}")
 
-            # if we couldn't fetch pnl, skip this bar (do not increment)
             if pnl_pct is None:
                 if DEBUG:
                     print(f"⚠️ {symbol}: get_live_pnl_for_monitor returned None; skipping this bar.")
                 continue
 
-            if DEBUG:
-                print(f"📊 {symbol}: live pnl% = {pnl_pct}")
+            # Log every bar’s PnL
+            print(f"📊 {symbol}: Live PnL = {pnl_pct:.2f}% | Loss Bars = {loss_bars}/{LOSS_BARS_LIMIT}")
 
+            # Count loss bars
             if pnl_pct < 0:
                 loss_bars += 1
                 if DEBUG:
                     print(f"⚠️ {symbol}: negative bar {loss_bars}/{LOSS_BARS_LIMIT}")
             else:
-                if loss_bars != 0 and DEBUG:
-                    print(f"✅ {symbol}: pnl recovered (was {loss_bars} negative bars) -> reset counter")
+                if loss_bars > 0 and DEBUG:
+                    print(f"✅ {symbol}: PnL recovered (was {loss_bars} negative bars)")
                 loss_bars = 0
 
+            # Execute close if limit reached
             if loss_bars >= LOSS_BARS_LIMIT:
                 if DEBUG:
-                    print(f"🚨 {symbol}: reached {loss_bars} negative bars -> executing TWO_BAR_CLOSE_EXIT")
-                # close with special reason
+                    print(f"🚨 {symbol}: {loss_bars} negative bars -> executing TWO_BAR_CLOSE_EXIT")
+
                 try:
-                    execute_market_exit(symbol, side, reason="TWO_BAR_CLOSE_EXIT")
+                    exit_price = execute_market_exit(symbol, side, reason="TWO_BAR_CLOSE_EXIT")
+                    from trade_notifier import notify_exit
+                    notify_exit(
+                        symbol=symbol,
+                        side=side,
+                        reason="TWO_BAR_CLOSE_EXIT",
+                        exit_price=exit_price,
+                    )
                 except Exception as e:
                     print(f"❌ Failed to execute TWO_BAR_CLOSE_EXIT for {symbol}: {e}")
                 break
