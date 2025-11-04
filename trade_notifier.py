@@ -1,4 +1,4 @@
-# trade_notifier.py (FINAL - Real PnL + Exit Reason Integrated)
+# trade_notifier.py (FINAL - Real PnL + Exit Reason Integratedd)
 import requests
 import threading
 import time
