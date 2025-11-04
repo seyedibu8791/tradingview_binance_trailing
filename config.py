@@ -1,4 +1,4 @@
-#config.py
+# config.py - trailing/TSI parameters removed
 import os
 import time
 import hmac
@@ -30,22 +30,6 @@ MARGIN_TYPE = os.getenv("MARGIN_TYPE", "ISOLATED").upper()
 MAX_ACTIVE_TRADES = int(os.getenv("MAX_ACTIVE_TRADES", 5))
 EXIT_MARKET_DELAY = int(os.getenv("EXIT_MARKET_DELAY", 10))
 OPPOSITE_CLOSE_DELAY = int(os.getenv("OPPOSITE_CLOSE_DELAY", 3))
-
-# =============================
-#  TRAILING STOP PARAMETERS
-# =============================
-TRAILING_ACTIVATION_PCT = float(os.getenv("TRAILING_ACTIVATION_PCT", 0.002))
-TS_LOW_OFFSET_PCT = float(os.getenv("TS_LOW_OFFSET_PCT", 0.001))
-TS_HIGH_OFFSET_PCT = float(os.getenv("TS_HIGH_OFFSET_PCT", 0.001))
-TRAILING_DISTANCE_PCT = float(os.getenv("TRAILING_DISTANCE_PCT", 0.003))
-TRAILING_UPDATE_INTERVAL = int(os.getenv("TRAILING_UPDATE_INTERVAL", 5))
-
-# =============================
-#  TSI TRAILING CONFIG (NEW)
-# =============================
-TSI_PRIMARY_TRIGGER_PCT = float(os.getenv("TSI_PRIMARY_TRIGGER_PCT", 0.003))       # activation threshold %
-TSI_LOW_PROFIT_OFFSET_PCT = float(os.getenv("TSI_LOW_PROFIT_OFFSET_PCT", 0.001))   # offset at 0.5% profit
-TSI_HIGH_PROFIT_OFFSET_PCT = float(os.getenv("TSI_HIGH_PROFIT_OFFSET_PCT", 0.001)) # offset at 10% profit
 
 # =============================
 #  LOSS CONTROL PARAMETERS
@@ -120,8 +104,4 @@ print("------------------------------")
 print(f"Environment:           {ENVIRONMENT}")
 print(f"Leverage:              {LEVERAGE}x ({MARGIN_TYPE})")
 print(f"Trade Amount:          ${TRADE_AMOUNT}")
-print(f"Trailing Activation:   {TRAILING_ACTIVATION_PCT}%")
-print(f"TSI Activation:        {TSI_PRIMARY_TRIGGER_PCT}%")
-print(f"TSI Low Offset:        {TSI_LOW_PROFIT_OFFSET_PCT}%")
-print(f"TSI High Offset:       {TSI_HIGH_PROFIT_OFFSET_PCT}%")
 print("------------------------------")
