@@ -442,6 +442,18 @@ def webhook():
             ticker, comment, close_price, interval = parts[0], parts[1], parts[2], parts[-1]
             bar_high = bar_low = None
 
+        # 🕒 Normalize interval from TradingView
+        interval = str(interval).lower().strip()
+
+        # If TradingView sends numeric interval (e.g. '1'), treat it as minutes (1m)
+        if interval.isdigit():
+            interval = f"{interval}m"
+
+        # Acceptable interval list, fallback to 1m if invalid
+        valid_intervals = ["1m", "3m", "5m", "15m", "30m", "45m", "1h", "2h", "4h", "1d"]
+        if interval not in valid_intervals:
+            interval = "1m"
+
         # normalize symbol to Binance futures format (e.g., BTC -> BTCUSDT)
         symbol = ticker.replace("USDT", "") + "USDT"
         try:
