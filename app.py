@@ -179,9 +179,11 @@ def start_loss_bar_monitor(symbol):
     """
     Monitors live PnL for each bar interval (from trades[symbol]['interval'])
     and closes the trade if there are LOSS_BARS_LIMIT consecutive negative bars.
-    Telegram message will be handled via trade_notifier.
+    Telegram message will be handled via trade_notifier.log_trade_exit().
     """
     def monitor():
+        from trade_notifier import log_trade_exit  # ✅ import inside thread to avoid circular import
+
         with trades_lock:
             t = trades.get(symbol)
             if not t:
@@ -194,6 +196,7 @@ def start_loss_bar_monitor(symbol):
 
         loss_bars = 0
         while True:
+            # wait for one full bar duration before next check
             time.sleep(bar_sec)
 
             with trades_lock:
@@ -236,13 +239,10 @@ def start_loss_bar_monitor(symbol):
 
                 try:
                     exit_price = execute_market_exit(symbol, side, reason="TWO_BAR_CLOSE_EXIT")
-                    from trade_notifier import notify_exit
-                    notify_exit(
-                        symbol=symbol,
-                        side=side,
-                        reason="TWO_BAR_CLOSE_EXIT",
-                        exit_price=exit_price,
-                    )
+
+                    # ✅ Use trade_notifier to handle Telegram + trade log
+                    log_trade_exit(symbol, exit_price, reason="TWO_BAR_CLOSE_EXIT")
+
                 except Exception as e:
                     print(f"❌ Failed to execute TWO_BAR_CLOSE_EXIT for {symbol}: {e}")
                 break
@@ -250,7 +250,6 @@ def start_loss_bar_monitor(symbol):
     t = threading.Thread(target=monitor, daemon=True)
     t.start()
     return t
-
 
 # ---------------------------
 # Entry placement
