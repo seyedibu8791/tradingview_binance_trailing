@@ -22,6 +22,7 @@ from config import (
     EXIT_MARKET_DELAY,
     OPPOSITE_CLOSE_DELAY,
     DEBUG,
+    get_unrealized_pnl_pct,  # ✅ Correct location
 )
 
 # ===========================
