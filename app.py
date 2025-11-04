@@ -454,67 +454,73 @@ def webhook():
 
         # 🕒 Normalize interval from TradingView
         interval = str(interval).lower().strip()
-
-        # If TradingView sends numeric interval (e.g. '1'), treat it as minutes (1m)
-        if interval.isdigit():
+        if interval.isdigit():  # numeric interval (e.g., 1 → 1m)
             interval = f"{interval}m"
 
-        # Acceptable interval list, fallback to 1m if invalid
         valid_intervals = ["1m", "3m", "5m", "15m", "30m", "45m", "1h", "2h", "4h", "1d"]
         if interval not in valid_intervals:
             interval = "1m"
 
-        # normalize symbol to Binance futures format (e.g., BTC -> BTCUSDT)
+        # normalize symbol
         symbol = ticker.replace("USDT", "") + "USDT"
         try:
             close_price = float(close_price)
         except Exception:
             close_price = 0.0
-        comment_raw = comment  # keep original raw comment text
+
+        comment_raw = comment
         comment = comment.upper().strip()
 
         print(f"📩 Alert: {symbol} | {comment} | {close_price} | interval={interval}")
 
+        # =============================
         # ENTRY: BUY
+        # =============================
         if comment == "BUY_ENTRY":
             with trades_lock:
                 existing = trades.get(symbol)
-            if existing and not existing.get("closed", True):
-                # Close existing trade then open new BUY
-                def worker_replace():
-                    # pass MARKET_CLOSE as reason for forced replacement
+
+            def worker_buy():
+                if existing and not existing.get("closed", True):
                     execute_market_exit(symbol, existing.get("side"), reason="SAME_DIRECTION_REENTRY")
                     time.sleep(OPPOSITE_CLOSE_DELAY)
-                    open_position(symbol, "BUY", close_price)
-                threading.Thread(target=worker_replace, daemon=True).start()
-            else:
+
                 with trades_lock:
-                    trades.setdefault(symbol, {})["interval"] = interval.lower()
-                    trades.setdefault(symbol, {})["last_bar_high"] = float(bar_high) if bar_high else close_price
-                    trades.setdefault(symbol, {})["last_bar_low"] = float(bar_low) if bar_low else close_price
+                    trades[symbol] = trades.get(symbol, {})
+                    trades[symbol]["interval"] = interval.lower()
+                    trades[symbol]["last_bar_high"] = float(bar_high) if bar_high else close_price
+                    trades[symbol]["last_bar_low"] = float(bar_low) if bar_low else close_price
+
                 open_position(symbol, "BUY", close_price)
 
+            threading.Thread(target=worker_buy, daemon=True).start()
+
+        # =============================
         # ENTRY: SELL
+        # =============================
         elif comment == "SELL_ENTRY":
             with trades_lock:
                 existing = trades.get(symbol)
-            if existing and not existing.get("closed", True):
-                # Close existing trade then open new SELL
-                def worker_replace():
+
+            def worker_sell():
+                if existing and not existing.get("closed", True):
                     execute_market_exit(symbol, existing.get("side"), reason="SAME_DIRECTION_REENTRY")
                     time.sleep(OPPOSITE_CLOSE_DELAY)
-                    open_position(symbol, "SELL", close_price)
-                threading.Thread(target=worker_replace, daemon=True).start()
-            else:
+
                 with trades_lock:
-                    trades.setdefault(symbol, {})["interval"] = interval.lower()
-                    trades.setdefault(symbol, {})["last_bar_high"] = float(bar_high) if bar_high else close_price
-                    trades.setdefault(symbol, {})["last_bar_low"] = float(bar_low) if bar_low else close_price
+                    trades[symbol] = trades.get(symbol, {})
+                    trades[symbol]["interval"] = interval.lower()
+                    trades[symbol]["last_bar_high"] = float(bar_high) if bar_high else close_price
+                    trades[symbol]["last_bar_low"] = float(bar_low) if bar_low else close_price
+
                 open_position(symbol, "SELL", close_price)
 
-        # EXIT signals -> immediate market close (TradingView comment: EXIT_LONG / EXIT_SHORT)
+            threading.Thread(target=worker_sell, daemon=True).start()
+
+        # =============================
+        # EXIT SIGNALS
+        # =============================
         elif comment.startswith("EXIT_LONG") or comment.startswith("EXIT_SHORT"):
-            # Determine reason from raw comment text (looking for 'trail' or 'loss')
             cr = comment_raw.lower()
             if "trail" in cr:
                 reason_key = "TRAIL_CLOSE"
@@ -526,13 +532,18 @@ def webhook():
             with trades_lock:
                 if symbol in trades and not trades[symbol].get("closed", True):
                     print(f"📡 {comment} received for {symbol} — initiating market close (reason={reason_key}).")
-                    threading.Thread(target=execute_market_exit, args=(symbol, trades[symbol].get("side"), reason_key), daemon=True).start()
+                    threading.Thread(
+                        target=execute_market_exit,
+                        args=(symbol, trades[symbol].get("side"), reason_key),
+                        daemon=True,
+                    ).start()
                 else:
                     print(f"📡 {comment} received for {symbol} but no active position found.")
 
-        # CROSS EXIT + reverse entry (close then open opposite)
+        # =============================
+        # CROSS EXIT + REVERSE ENTRY
+        # =============================
         elif comment == "CROSS_EXIT_LONG":
-            # Close BUY then open SELL
             def worker_cross_long():
                 execute_market_exit(symbol, "BUY", reason="CROSS_EXIT")
                 time.sleep(OPPOSITE_CLOSE_DELAY)
@@ -540,7 +551,6 @@ def webhook():
             threading.Thread(target=worker_cross_long, daemon=True).start()
 
         elif comment == "CROSS_EXIT_SHORT":
-            # Close SELL then open BUY
             def worker_cross_short():
                 execute_market_exit(symbol, "SELL", reason="CROSS_EXIT")
                 time.sleep(OPPOSITE_CLOSE_DELAY)
