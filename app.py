@@ -1,4 +1,4 @@
-# app.py (Final) - trailing logic removed, exit alerts close market positions
+# app.py (Final)
 from flask import Flask, request, jsonify
 import requests
 import hmac
@@ -21,8 +21,10 @@ from config import (
     MAX_ACTIVE_TRADES,
     EXIT_MARKET_DELAY,
     OPPOSITE_CLOSE_DELAY,
+    LOSS_BARS_LIMIT,            # imported from config
     DEBUG,
-    get_unrealized_pnl_pct,  # ✅ Correct location
+    get_live_pnl_for_monitor,   # use this for 2-bar monitor
+    get_unrealized_pnl_pct,     # keep existing function available
 )
 
 # ===========================
@@ -145,6 +147,106 @@ def calculate_quantity(symbol):
 
 
 # ---------------------------
+# Helper: parse TradingView interval string into seconds
+# ---------------------------
+def interval_to_seconds(interval_str: str) -> int:
+    """
+    Convert TradingView interval like '5m', '15m', '1h', '4h', '1d' into seconds.
+    If interval is numeric (e.g., '5'), treat as minutes.
+    Defaults to 900 (15m) on unknown format.
+    """
+    if not interval_str:
+        return 900
+    s = interval_str.strip().lower()
+    try:
+        if s.endswith('m'):
+            return int(s[:-1]) * 60
+        if s.endswith('h'):
+            return int(s[:-1]) * 3600
+        if s.endswith('d'):
+            return int(s[:-1]) * 86400
+        # numeric only -> minutes
+        if s.isdigit():
+            return int(s) * 60
+    except Exception:
+        pass
+    return 900
+
+
+# ---------------------------
+# Background monitor: 2-bar continuous negative PnL
+# ---------------------------
+def start_loss_bar_monitor(symbol):
+    """
+    Start a daemon thread that checks live PnL every bar interval (from trades[symbol]['interval'])
+    and closes the trade if there are LOSS_BARS_LIMIT consecutive negative bars.
+    """
+    def monitor():
+        with trades_lock:
+            t = trades.get(symbol)
+            if not t:
+                return
+            interval_str = t.get("interval", "15m")
+            side = t.get("side", "")
+        bar_sec = interval_to_seconds(interval_str)
+        if DEBUG:
+            print(f"🔎 Starting loss monitor for {symbol}: interval={interval_str} ({bar_sec}s), limit={LOSS_BARS_LIMIT}")
+
+        loss_bars = 0
+        while True:
+            # sleep for one bar duration
+            time.sleep(bar_sec)
+
+            with trades_lock:
+                t = trades.get(symbol)
+                if not t or t.get("closed"):
+                    if DEBUG:
+                        print(f"🔒 Monitor stopped for {symbol}: no trade or closed.")
+                    break
+                # refresh side (in case it changed)
+                side = t.get("side", side)
+
+            try:
+                pnl_pct = get_live_pnl_for_monitor(symbol)
+            except Exception as e:
+                pnl_pct = None
+                if DEBUG:
+                    print(f"⚠️ Error calling get_live_pnl_for_monitor for {symbol}: {e}")
+
+            # if we couldn't fetch pnl, skip this bar (do not increment)
+            if pnl_pct is None:
+                if DEBUG:
+                    print(f"⚠️ {symbol}: get_live_pnl_for_monitor returned None; skipping this bar.")
+                continue
+
+            if DEBUG:
+                print(f"📊 {symbol}: live pnl% = {pnl_pct}")
+
+            if pnl_pct < 0:
+                loss_bars += 1
+                if DEBUG:
+                    print(f"⚠️ {symbol}: negative bar {loss_bars}/{LOSS_BARS_LIMIT}")
+            else:
+                if loss_bars != 0 and DEBUG:
+                    print(f"✅ {symbol}: pnl recovered (was {loss_bars} negative bars) -> reset counter")
+                loss_bars = 0
+
+            if loss_bars >= LOSS_BARS_LIMIT:
+                if DEBUG:
+                    print(f"🚨 {symbol}: reached {loss_bars} negative bars -> executing TWO_BAR_CLOSE_EXIT")
+                # close with special reason
+                try:
+                    execute_market_exit(symbol, side, reason="TWO_BAR_CLOSE_EXIT")
+                except Exception as e:
+                    print(f"❌ Failed to execute TWO_BAR_CLOSE_EXIT for {symbol}: {e}")
+                break
+
+    t = threading.Thread(target=monitor, daemon=True)
+    t.start()
+    return t
+
+
+# ---------------------------
 # Entry placement
 # ---------------------------
 def open_position(symbol, side, limit_price):
@@ -228,6 +330,13 @@ def wait_and_notify_filled_entry(symbol, side, order_id):
                 log_trade_entry(symbol, side, order_id, avg_price, trades[symbol].get("interval", "1h"))
             except Exception:
                 print(f"📩 Filled (log): {symbol} | {side} | {avg_price}")
+
+            # ✅ Start monitoring for 2-bar negative PnL after entry confirmation
+            try:
+                start_loss_bar_monitor(symbol)
+            except Exception as e:
+                if DEBUG:
+                    print(f"⚠️ Failed to start_loss_bar_monitor for {symbol}: {e}")
 
             notified = True
 
