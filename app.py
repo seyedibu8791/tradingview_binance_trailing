@@ -1,4 +1,4 @@
-# app.py (Final)
+# app.py (Finals)
 from flask import Flask, request, jsonify
 import requests
 import hmac
