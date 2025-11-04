@@ -1,4 +1,4 @@
-# config.py - trailing/TSI parameters removed
+# config.py - trailing/TSI parameters removedd
 import os
 import time
 import hmac
