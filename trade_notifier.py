@@ -1,4 +1,4 @@
-# trade_notifier.py (FINAL - Real PnL + Exit Reason Integratedd)
+# trade_notifier.py (updated with 2-bar continuous negative PnL exit)
 import requests
 import threading
 import time
@@ -19,6 +19,8 @@ from config import (
     DEBUG,
     LEVERAGE,
     TRADE_AMOUNT,
+    get_unrealized_pnl_pct,
+    LOSS_BARS_LIMIT,
 )
 
 # =======================
@@ -26,6 +28,7 @@ from config import (
 # =======================
 trades = {}              # {symbol: {...trade info...}}
 notified_orders = set()  # prevent duplicate entry notifications
+pnl_neg_counter = {}     # Track consecutive negative pnl bars
 
 
 # =======================
@@ -153,6 +156,9 @@ def log_trade_entry(symbol: str, side: str, order_id: str, filled_price: float, 
         "interval": interval.lower(),
     }
 
+    # Start monitoring negative PnL after entry
+    threading.Thread(target=monitor_negative_pnl, args=(symbol,), daemon=True).start()
+
     direction_emoji = "🟩⬆️" if side.upper() == "BUY" else "🟥⬇️"
     msg = (
         f"{direction_emoji} <b>{side.upper()} ENTRY</b>\n"
@@ -195,6 +201,7 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "MARKET_CLOSE
             "CROSS_EXIT": "⚔️ Cross Exit",
             "STOP_LOSS": "🚨 Stop Loss Hit",
             "MARKET_CLOSE": "✅ Market Close",
+            "LOSS_BAR_EXIT": "2️⃣ 2 Bar Close Exit",
         }.get(reason, reason)
 
         msg = (
@@ -218,6 +225,51 @@ def log_trade_exit(symbol: str, filled_price: float, reason: str = "MARKET_CLOSE
     except Exception as e:
         print("❌ log_trade_exit error:", e)
         send_telegram_message(f"⚠️ Error logging trade exit for {symbol}: {e}")
+
+
+# =======================
+# 🕒 INTERVAL PARSER
+# =======================
+def parse_interval_to_seconds(interval: str) -> int:
+    """Convert TradingView interval (like '1m', '5m', '1h') into seconds."""
+    unit = interval[-1]
+    value = int(interval[:-1])
+    if unit == "m":
+        return value * 60
+    elif unit == "h":
+        return value * 3600
+    elif unit == "d":
+        return value * 86400
+    else:
+        return 300  # default 5 min
+
+
+# =======================
+# 🔁 MONITOR NEGATIVE PNL
+# =======================
+def monitor_negative_pnl(symbol: str):
+    """Check PnL for open trade every bar; close if negative for LOSS_BARS_LIMIT bars."""
+    try:
+        while symbol in trades and not trades[symbol].get("closed"):
+            interval = trades[symbol].get("interval", "5m")
+            interval_sec = parse_interval_to_seconds(interval)
+            pnl = get_unrealized_pnl_pct(symbol)
+
+            if pnl is not None:
+                if pnl < 0:
+                    pnl_neg_counter[symbol] = pnl_neg_counter.get(symbol, 0) + 1
+                    if pnl_neg_counter[symbol] >= LOSS_BARS_LIMIT:
+                        t = trades[symbol]
+                        close_trade_on_binance(symbol, t["side"])
+                        log_trade_exit(symbol, t["entry_price"], reason="LOSS_BAR_EXIT")
+                        send_telegram_message(f"⚠️ 2 bar close exit triggered for {symbol}")
+                        break
+                else:
+                    pnl_neg_counter[symbol] = 0
+            time.sleep(interval_sec)
+    except Exception as e:
+        if DEBUG:
+            print(f"⚠️ monitor_negative_pnl error for {symbol}: {e}")
 
 
 # =======================
